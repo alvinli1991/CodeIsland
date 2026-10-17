@@ -917,6 +917,8 @@ final class AppState {
         // (whose host genuinely IS Antigravity.app) never collides with the fork's
         // "antigravity" CLI sessions (#215).
         case "google-antigravity": return path.contains("/antigravity.app/contents/")
+        case "catpaw-idekit": return path.hasSuffix(".app/contents/macos/idea")
+        case "catpaw":      return path.contains("/catpaw ide.app/contents/")
         case "workbuddy":   return path.contains("/workbuddy.app/contents/")
         case "hermes":      return path.contains("/hermes.app/contents/")
         // Claude Code Desktop (#211): local Code-tab sessions live inside Claude.app.
@@ -1630,7 +1632,7 @@ final class AppState {
     /// Recompute cached status/source/counts from sessions in a single O(n) pass.
     /// Call after any mutation to `sessions` or session status.
     func refreshDerivedState() {
-        let summary = deriveSessionSummary(from: sessions)
+        let summary = deriveSessionSummary(from: sessions.filter { !$0.value.isFoldedCatPawChild(in: sessions) })
         // Whenever no session is actively working, honor the user-configured
         // default mascot. Covers both "no sessions at all" (#102) and "all
         // sessions idle" (#149) — without this, a user who sets the default
@@ -3458,16 +3460,18 @@ final class AppState {
             var snapshot = SessionSnapshot(startTime: p.startTime)
             snapshot.cwd = p.cwd
             snapshot.source = source
+            snapshot.catpawIsSubagent = p.catpawIsSubagent ?? false
+            snapshot.catpawAgentName = p.catpawAgentName
             snapshot.model = p.model
             snapshot.sessionTitle = p.sessionTitle
             snapshot.sessionTitleSource = p.sessionTitleSource
             snapshot.providerSessionId = p.providerSessionId
-            snapshot.lastUserPrompt = p.lastUserPrompt
-            snapshot.lastAssistantMessage = p.lastAssistantMessage
-            if let prompt = p.lastUserPrompt {
+            snapshot.lastUserPrompt = snapshot.catpawIsSubagent ? nil : (CatPawHookPayload.isSource(source) ? CatPawHookPayload.preview(p.lastUserPrompt) : p.lastUserPrompt)
+            snapshot.lastAssistantMessage = snapshot.catpawIsSubagent ? nil : (CatPawHookPayload.isSource(source) ? CatPawHookPayload.preview(p.lastAssistantMessage) : p.lastAssistantMessage)
+            if let prompt = snapshot.lastUserPrompt {
                 snapshot.addRecentMessage(ChatMessage(isUser: true, text: prompt))
             }
-            if let reply = p.lastAssistantMessage {
+            if let reply = snapshot.lastAssistantMessage {
                 snapshot.addRecentMessage(ChatMessage(isUser: false, text: reply))
             }
             snapshot.termApp = p.termApp

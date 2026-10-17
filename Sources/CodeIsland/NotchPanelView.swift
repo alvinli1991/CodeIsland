@@ -3739,6 +3739,7 @@ private struct SessionIdentityLine: View {
     let sessionFontSize: CGFloat
     let sessionColor: Color
     let dividerColor: Color
+    var showCatpawSubagentCount = true
     @AppStorage(SettingsKey.showGitBranch) private var showGitBranch = SettingsDefaults.showGitBranch
     @AppStorage(SettingsKey.showProjectName) private var showProjectName = SettingsDefaults.showProjectName
 
@@ -3758,6 +3759,16 @@ private struct SessionIdentityLine: View {
     private func line(showsShortId: Bool) -> some View {
         let headline = session.headline(showProjectName: showProjectName)
         return HStack(spacing: 4) {
+            if showCatpawSubagentCount, let summary = session.catpawChildStatusLabel {
+                SessionTag("+\(session.catpawChildrenRunning + session.catpawChildrenCompleted) Sub", color: .purple)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(3)
+                    .help(summary)
+            }
+            if let label = session.catpawSubagentLabel {
+                SessionTag(label, color: .purple, maxWidth: 150)
+                    .help("\(label) · \(displaySessionId)")
+            }
             if headline.kind == .project {
                 ProjectNameLink(
                     name: headline.text,
@@ -4224,7 +4235,8 @@ private struct SessionCard: View {
                 projectColor: .white.opacity(0.95),
                 sessionFontSize: fontSize,
                 sessionColor: .white.opacity(0.76),
-                dividerColor: .white.opacity(0.28)
+                dividerColor: .white.opacity(0.28),
+                showCatpawSubagentCount: false
             )
             // The line itself fills the gap up to the tags: a Spacer here took
             // a share of the row and truncated a short name beside blank space.
@@ -4235,7 +4247,13 @@ private struct SessionCard: View {
                     SessionTag("@\(remote)", color: Color(red: 0.45, green: 0.72, blue: 1.0), maxWidth: 110)
                         .help("@\(remote)")
                 }
-                if !session.subagents.isEmpty {
+                if let summary = session.catpawChildStatusLabel {
+                    SessionTag("+\(session.catpawChildrenRunning + session.catpawChildrenCompleted) Sub",
+                               color: Color(red: 0.65, green: 0.55, blue: 0.95))
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(3)
+                        .help(summary)
+                } else if !session.subagents.isEmpty {
                     SessionTag("+\(session.subagents.count) Sub", color: Color(red: 0.65, green: 0.55, blue: 0.95))
                 }
                 if session.isYoloMode == true {
@@ -5313,6 +5331,8 @@ private let cliIconFiles: [String: String] = [
     "kiro": "kiro",
     "openclaw": "openclaw",
     "minimax": "minimax",
+    "catpaw": "catpaw",
+    "catpaw-idekit": "catpaw",
     "mimo": "mimo",
 ]
 
