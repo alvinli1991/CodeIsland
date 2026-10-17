@@ -796,7 +796,7 @@ private struct CompactRightWing: View {
     var body: some View {
         HStack(spacing: 6) {
             if expanded {
-                ExpandedHeaderControls(soundEnabled: $soundEnabled)
+                ExpandedHeaderControls(appState: appState, soundEnabled: $soundEnabled)
             } else {
                 // Quiet hours active — explains why event sounds are silent.
                 if inQuietHours {
@@ -1082,6 +1082,7 @@ struct NotchIconButton: View {
     let action: () -> Void
     @State private var hovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     /// The drawn circle, and the hit target around it.
     static let circleSize: CGFloat = 22
@@ -1091,13 +1092,13 @@ struct NotchIconButton: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(tint.opacity(hovering ? 1.0 : 0.85))
+                .foregroundStyle(tint.opacity(isEnabled ? (hovering ? 1.0 : 0.85) : 0.3))
                 .frame(width: Self.circleSize, height: Self.circleSize)
                 .background(
                     Circle()
-                        .fill(tint.opacity(hovering ? 0.2 : 0.08))
+                        .fill(tint.opacity(isEnabled && hovering ? 0.2 : 0.08))
                 )
-                .scaleEffect(hovering && !reduceMotion ? 1.1 : 1.0)
+                .scaleEffect(isEnabled && hovering && !reduceMotion ? 1.1 : 1.0)
                 .frame(width: Self.hitSize, height: Self.hitSize)
                 .contentShape(Rectangle())
         }
@@ -1110,8 +1111,9 @@ struct NotchIconButton: View {
     }
 }
 
-/// The expanded header's buttons: sound, Settings, and Quit, which asks once.
+/// Fixed header actions; clearing stays visible and dims when nothing is eligible.
 private struct ExpandedHeaderControls: View {
+    var appState: AppState
     @Binding var soundEnabled: Bool
     @StateObject private var quit = QuitConfirmation()
     @ObservedObject private var l10n = L10n.shared
@@ -1120,6 +1122,14 @@ private struct ExpandedHeaderControls: View {
     var body: some View {
         // 4pt between 24pt hit targets keeps the 6pt gap between the circles.
         HStack(spacing: 4) {
+            NotchIconButton(icon: "checkmark.circle", tint: Color(red: 0.4, green: 1.0, blue: 0.5),
+                            tooltip: l10n["clear_completed_sessions"] + "\n" + l10n["clear_completed_sessions_help"]) {
+                appState.clearCompletedSessions()
+            }
+            .disabled(appState.clearableCompletedSessionIDs.isEmpty)
+            .accessibilityLabel(l10n["clear_completed_sessions"])
+            .accessibilityHint(l10n["clear_completed_sessions_help"])
+            .accessibilityIdentifier("clearCompletedSessions")
             NotchIconButton(icon: soundEnabled ? "speaker.wave.2" : "speaker.slash", tooltip: soundEnabled ? l10n["mute"] : l10n["enable_sound_tooltip"]) {
                 soundEnabled.toggle()
             }
