@@ -264,6 +264,8 @@ extension AppState {
             // retires it on the same clock as every other card.
             snapshot.lastActivity = lastActivity
         }
+        let evidence: RemovedSessionRevivalEvidence = snapshot.status == .idle ? .passive : .activeWork
+        guard shouldAdmitRemovedSession(key, evidence: evidence) else { return }
         sessions[key] = snapshot
         if movesTurnState {
             noteCoworkTurnHost(key)

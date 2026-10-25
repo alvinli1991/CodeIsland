@@ -135,6 +135,7 @@ struct NotchPanelView: View {
     @State private var hoverTimer: Timer?
     @State private var isHovered = false
     @State private var idleHovered = false
+    @State private var idleRemovalSelection: IdleSessionRemovalSelection?
     /// Three-stage hover: collapsed → prehover (immediate ack) → expanded (after delay)
     @State private var hoverPhase: NotchHoverPhase = .collapsed
     /// Curtain animation for tool status toggle
@@ -161,6 +162,9 @@ struct NotchPanelView: View {
     }
     private var shouldShowExpanded: Bool {
         showBar && appState.surface.isExpanded
+    }
+    private func dismissCleanup() {
+        idleRemovalSelection = nil
     }
     /// Prehover acknowledgement is only rendered on the collapsed active bar —
     /// once the surface expands (from hover or any other path) it disappears.
@@ -263,7 +267,13 @@ struct NotchPanelView: View {
                         } else {
                             Spacer(minLength: 0)
                         }
-                        CompactRightWing(appState: appState, expanded: shouldShowExpanded, hasNotch: hasNotch)
+                        CompactRightWing(appState: appState, expanded: shouldShowExpanded, hasNotch: hasNotch) {
+                            let selection = appState.idleSessionRemovalSelection
+                            guard !selection.isEmpty, appState.surface == .sessionList else { return }
+                            hoverTimer?.invalidate()
+                            hoverTimer = nil
+                            idleRemovalSelection = selection
+                        }
                     }
                     .frame(height: notchHeight)
                     // Recap on hover while collapsed — shows whenever hover
@@ -386,8 +396,21 @@ struct NotchPanelView: View {
                         SessionListView(appState: appState, onlySessionId: appState.justCompletedSessionId)
                             .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .sessionList:
-                        SessionListView(appState: appState, onlySessionId: nil)
-                            .transition(.blurFade.combined(with: .move(edge: .top)))
+                        VStack(spacing: 0) {
+                            if let requested = idleRemovalSelection {
+                                let validated = appState.validatedIdleSessionRemovalSelection(requested)
+                                IdleSessionRemovalBanner(
+                                    count: validated.cardCount,
+                                    onCancel: dismissCleanup,
+                                    onRemove: {
+                                        appState.removeIdleSessions(selection: requested)
+                                        dismissCleanup()
+                                    }
+                                )
+                            }
+                            SessionListView(appState: appState, onlySessionId: nil)
+                        }
+                        .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .collapsed:
                         EmptyView()
                     }
@@ -539,7 +562,17 @@ struct NotchPanelView: View {
                     }
                 }
             }
+            .onChange(of: idleRemovalSelection == nil ? .empty : appState.idleSessionRemovalSelection) { _, _ in
+                if let requested = idleRemovalSelection,
+                   appState.validatedIdleSessionRemovalSelection(requested).isEmpty {
+                    dismissCleanup()
+                }
+            }
+            .onChange(of: Set(appState.permissionQueue.map(\.id) + appState.questionQueue.map(\.id))) { old, new in
+                if idleRemovalSelection != nil, old != new { dismissCleanup() }
+            }
             .onChange(of: appState.surface) { _, newSurface in
+                if newSurface != .sessionList { idleRemovalSelection = nil }
                 // The surface can change from outside the hover flow (auto-expand
                 // cards, click-to-close, …) — keep the phase from going stale.
                 if newSurface == .collapsed && !isHovered {
@@ -763,6 +796,7 @@ private struct CompactRightWing: View {
     var appState: AppState
     let expanded: Bool
     let hasNotch: Bool
+    var onClear: () -> Void
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
@@ -796,7 +830,7 @@ private struct CompactRightWing: View {
     var body: some View {
         HStack(spacing: 6) {
             if expanded {
-                ExpandedHeaderControls(soundEnabled: $soundEnabled)
+                ExpandedHeaderControls(appState: appState, soundEnabled: $soundEnabled, onClear: onClear)
             } else {
                 // Quiet hours active — explains why event sounds are silent.
                 if inQuietHours {
@@ -1079,9 +1113,11 @@ struct NotchIconButton: View {
     let icon: String
     var tint: Color = .white
     var tooltip: String? = nil
+    var accessibilityTitle: String? = nil
     let action: () -> Void
     @State private var hovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     /// The drawn circle, and the hit target around it.
     static let circleSize: CGFloat = 22
@@ -1091,13 +1127,13 @@ struct NotchIconButton: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(tint.opacity(hovering ? 1.0 : 0.85))
+                .foregroundStyle(tint.opacity(isEnabled ? (hovering ? 1.0 : 0.85) : 0.3))
                 .frame(width: Self.circleSize, height: Self.circleSize)
                 .background(
                     Circle()
-                        .fill(tint.opacity(hovering ? 0.2 : 0.08))
+                        .fill(tint.opacity(isEnabled && hovering ? 0.2 : 0.08))
                 )
-                .scaleEffect(hovering && !reduceMotion ? 1.1 : 1.0)
+                .scaleEffect(isEnabled && hovering && !reduceMotion ? 1.1 : 1.0)
                 .frame(width: Self.hitSize, height: Self.hitSize)
                 .contentShape(Rectangle())
         }
@@ -1106,13 +1142,14 @@ struct NotchIconButton: View {
         .help(tooltip ?? "")
         // Icon-only: VoiceOver would otherwise read the symbol name
         // ("gearshape"), in English, instead of what the button does.
-        .accessibilityLabel(tooltip ?? icon)
+        .accessibilityLabel(accessibilityTitle ?? tooltip ?? icon)
     }
 }
 
-/// The expanded header's buttons: sound, Settings, and Quit, which asks once.
 private struct ExpandedHeaderControls: View {
+    var appState: AppState
     @Binding var soundEnabled: Bool
+    var onClear: () -> Void
     @StateObject private var quit = QuitConfirmation()
     @ObservedObject private var l10n = L10n.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1120,6 +1157,12 @@ private struct ExpandedHeaderControls: View {
     var body: some View {
         // 4pt between 24pt hit targets keeps the 6pt gap between the circles.
         HStack(spacing: 4) {
+            NotchIconButton(icon: "trash", tooltip: l10n["remove_idle_sessions_help"],
+                            accessibilityTitle: l10n["remove_idle_sessions"]) {
+                onClear()
+            }
+            .disabled(appState.surface != .sessionList || appState.idleSessionRemovalSelection.isEmpty)
+            .accessibilityIdentifier("removeIdleSessions")
             NotchIconButton(icon: soundEnabled ? "speaker.wave.2" : "speaker.slash", tooltip: soundEnabled ? l10n["mute"] : l10n["enable_sound_tooltip"]) {
                 soundEnabled.toggle()
             }

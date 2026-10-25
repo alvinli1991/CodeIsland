@@ -330,6 +330,10 @@ final class AppState {
     private let processMonitor = SessionProcessMonitor()
     /// Sessions in the grace period after their process exited, with that process.
     private var exitingSessions: [String: ProcessIdentity] = [:]
+    /// Run-local tombstones keep passive discovery from immediately restoring cards the user removed.
+    @ObservationIgnored var manuallyRemovedSessions: [String: Date] = [:]
+    /// The connected group recorded at removal time; real activity revives all of its members together.
+    @ObservationIgnored private var manuallyRemovedSessionPeers: [String: Set<String>] = [:]
     @ObservationIgnored
     nonisolated(unsafe) private var saveTimer: Timer?
     /// Session discovery: the session-store watcher and the scans it runs off
@@ -896,8 +900,9 @@ final class AppState {
 
     /// Remove a session, clean up its monitor, and resume any pending continuations.
     /// Every removal path (cleanup timer, process exit, reducer effect) goes through here
-    /// so leaked continuations / connections are impossible.
-    func removeSession(_ sessionId: String) {
+    /// so leaked continuations / connections are impossible. Atomic batch removals defer
+    /// derived-state work with `refresh: false`, then refresh once after the whole group is gone.
+    func removeSession(_ sessionId: String, refresh: Bool = true) {
         let displayOnlyWaitBefore = displayOnlyWaitKind(forSession: sessionId)
         // Resume ALL pending continuations for this session
         drainPermissions(forSession: sessionId, reason: "removeSession")
@@ -931,9 +936,76 @@ final class AppState {
         if activeSessionId == sessionId {
             activeSessionId = mostActiveSessionId()
         }
+        if refresh {
+            startRotationIfNeeded()
+            refreshDerivedState()
+            scheduleSave()
+        }
+    }
+
+    /// Parent/child cards form one removal unit. Any live work or pending
+    /// interaction retains the whole connected group.
+    var idleSessionRemovalSelection: IdleSessionRemovalSelection {
+        let blocked = Set(permissionQueue.map { $0.event.sessionId ?? "default" }
+            + questionQueue.map { $0.event.sessionId ?? "default" })
+        return IdleSessionRemovalPolicy.selection(sessions: sessions, blockedSessionIDs: blocked)
+    }
+
+    func validatedIdleSessionRemovalSelection(
+        _ requested: IdleSessionRemovalSelection
+    ) -> IdleSessionRemovalSelection {
+        // Preserve only exact groups captured when confirmation opened. A new child or a status
+        // change retains the original group, while unrelated sessions that later become idle stay put.
+        let current = idleSessionRemovalSelection
+        let requestedGroups = Set(requested.groups)
+        return IdleSessionRemovalSelection(groups: current.groups.filter(requestedGroups.contains))
+    }
+
+    func removeIdleSessions(selection requested: IdleSessionRemovalSelection? = nil) {
+        let selection = requested.map(validatedIdleSessionRemovalSelection) ?? idleSessionRemovalSelection
+        guard !selection.isEmpty else { return }
+        let now = Date()
+        for group in selection.groups {
+            for id in group {
+                manuallyRemovedSessions[id] = now
+                manuallyRemovedSessionPeers[id] = group
+            }
+            for id in group.sorted() {
+                followUps.completionSeen(sessionId: id)
+                removeSession(id, refresh: false)
+            }
+        }
+        // Tombstones need only cover recent passive callbacks and must not grow for the app's lifetime.
+        if manuallyRemovedSessions.count > 1024 {
+            let oldest = manuallyRemovedSessions.sorted { $0.value < $1.value }
+                .prefix(manuallyRemovedSessions.count - 1024)
+            for entry in oldest {
+                manuallyRemovedSessions.removeValue(forKey: entry.key)
+                manuallyRemovedSessionPeers.removeValue(forKey: entry.key)
+            }
+        }
         startRotationIfNeeded()
         refreshDerivedState()
         scheduleSave()
+    }
+
+    @discardableResult
+    func shouldAdmitRemovedSession(
+        _ sessionId: String,
+        evidence: RemovedSessionRevivalEvidence
+    ) -> Bool {
+        guard manuallyRemovedSessions[sessionId] != nil else { return true }
+        switch evidence {
+        case .activeWork, .blockingRequest:
+            let group = manuallyRemovedSessionPeers[sessionId] ?? [sessionId]
+            for member in group {
+                manuallyRemovedSessions.removeValue(forKey: member)
+                manuallyRemovedSessionPeers.removeValue(forKey: member)
+            }
+            return true
+        case .passive:
+            return false
+        }
     }
 
     // MARK: - Compact bar mascot rotation
@@ -1519,6 +1591,11 @@ final class AppState {
 
         let sessionId = event.sessionId ?? "default"
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
+        let freshWork: Set<String> = ["SessionStart", "UserPromptSubmit", "PreToolUse", "SubagentStart"]
+        guard shouldAdmitRemovedSession(
+            sessionId,
+            evidence: freshWork.contains(normalizedEventName) ? .activeWork : .passive
+        ) else { return }
 
         // Account chatter, not session activity. CodeBuddy fires
         // Notification(auth_success) as the CLI boots — before SessionStart and
@@ -1899,6 +1976,7 @@ final class AppState {
         hookConnectionId: UUID? = nil
     ) {
         let sessionId = event.sessionId ?? "default"
+        guard shouldAdmitRemovedSession(sessionId, evidence: .blockingRequest) else { return }
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -2317,6 +2395,7 @@ final class AppState {
         hookConnectionId: UUID? = nil
     ) {
         let sessionId = event.sessionId ?? "default"
+        guard shouldAdmitRemovedSession(sessionId, evidence: .blockingRequest) else { return }
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -3308,6 +3387,10 @@ final class AppState {
     func integrateDiscovered(_ discovered: [DiscoveredSession]) {
         var didMutate = false
         for info in discovered {
+            guard shouldAdmitRemovedSession(
+                info.sessionId,
+                evidence: info.status.map { $0 == .idle ? .passive : .activeWork } ?? .passive
+            ) else { continue }
             if shouldSuppressClosedCodexDesktopDiscovery(info) {
                 continue
             }
