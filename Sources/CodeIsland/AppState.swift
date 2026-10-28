@@ -1666,6 +1666,15 @@ final class AppState {
 
         let sessionId = event.sessionId ?? "default"
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
+        // Claude Code compacting a finished session in the background: no
+        // card to open again, none to wake — not by its PreCompact, nor by
+        // the stop of the agent writing the summary or the restart from it.
+        // Before the removed-card check: none of it is the user's session
+        // waking, so a card the user removed stays removed (#385).
+        if backgroundCompactions.absorbs(event, session: sessions[sessionId], now: Date()) {
+            return
+        }
+
         guard shouldAdmitRemovedSession(
             sessionId,
             evidence: .forHookEvent(event, normalizedEventName: normalizedEventName)
@@ -1710,13 +1719,6 @@ final class AppState {
         if (event.rawJSON["_source"] as? String) == "codex"
             && sessions[sessionId] == nil
             && event.rawJSON["transcript_path"] is NSNull {
-            return
-        }
-
-        // Claude Code compacting a finished session in the background: no
-        // card to open again, none to wake — not by its PreCompact, nor by
-        // the stop of the agent writing the summary or the restart from it.
-        if backgroundCompactions.absorbs(event, session: sessions[sessionId], now: Date()) {
             return
         }
 

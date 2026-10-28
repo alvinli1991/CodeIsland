@@ -264,15 +264,46 @@ final class AppStateIdleSessionRemovalTests: XCTestCase {
         XCTAssertNil(app.manuallyRemovedSessions["codexapp:t-removed"])
     }
 
-    func testACompactionBringsTheCardBack() throws {
+    /// A /compact the user types is their session at work again.
+    func testAManualCompactBringsTheCardBack() throws {
         let app = AppState()
         app.sessions = ["removed": session(.idle)]
         app.removeIdleSessions()
 
-        app.handleEvent(try hook(["hook_event_name": "PreCompact", "session_id": "removed"]))
+        app.handleEvent(try hook(["hook_event_name": "PreCompact", "session_id": "removed", "trigger": "manual"]))
 
         XCTAssertEqual(app.sessions["removed"]?.status, .processing)
         XCTAssertNil(app.manuallyRemovedSessions["removed"])
+    }
+
+    /// Claude Code compacting the finished session in the background is not
+    /// (#388): the card stays removed, and its tombstone with it, so the
+    /// next discovery scan doesn't bring it back either.
+    func testABackgroundCompactionLeavesARemovedCardRemoved() throws {
+        let app = AppState()
+        app.sessions = ["removed": session(.idle)]
+        app.removeIdleSessions()
+
+        for payload: [String: Any] in [
+            ["hook_event_name": "PreCompact", "trigger": "auto"],
+            ["hook_event_name": "SubagentStop", "agent_id": "compactor-agent", "agent_type": ""],
+            ["hook_event_name": "SessionStart", "source": "compact"],
+        ] {
+            var payload = payload
+            payload["session_id"] = "removed"
+            payload["_source"] = "claude"
+            app.handleEvent(try hook(payload))
+            XCTAssertNil(app.sessions["removed"], "\(payload)")
+            XCTAssertNotNil(app.manuallyRemovedSessions["removed"], "\(payload)")
+        }
+
+        var rediscovered = DiscoveredSession(
+            sessionId: "removed", cwd: "/nonexistent", tty: nil, model: nil, pid: nil,
+            modifiedAt: Date().addingTimeInterval(60), recentMessages: []
+        )
+        rediscovered.status = .idle
+        app.integrateDiscovered([rediscovered])
+        XCTAssertNil(app.sessions["removed"])
     }
 
     /// Whatever brings a card back — a Cursor fold creating its parent, a
