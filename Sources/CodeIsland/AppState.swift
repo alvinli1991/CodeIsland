@@ -245,6 +245,9 @@ final class AppState {
             if surface != oldValue {
                 followUps.surfaceChanged(surface)
             }
+            if surface != .sessionList, idleSessionRemovalRequest != nil {
+                idleSessionRemovalRequest = nil
+            }
             switch surface {
             case .approvalCard(let sid): cardRequestId = pendingPermission(forSession: sid)?.id
             case .questionCard(let sid): cardRequestId = pendingQuestion(forSession: sid)?.id
@@ -335,6 +338,14 @@ final class AppState {
     private let processMonitor = SessionProcessMonitor()
     /// Sessions in the grace period after their process exited, with that process.
     private var exitingSessions: [String: ProcessIdentity] = [:]
+    /// Run-local tombstones keep passive discovery from immediately restoring cards the user removed.
+    @ObservationIgnored var manuallyRemovedSessions: [String: Date] = [:]
+    /// The connected group recorded at removal time; real activity revives all of its members together.
+    @ObservationIgnored private var manuallyRemovedSessionPeers: [String: Set<String>] = [:]
+    /// The idle cards the session list's banner asks the user to confirm
+    /// removing, as they were when the header button was clicked. nil: no
+    /// banner. Leaving the list, or nothing in it staying removable, drops it.
+    var idleSessionRemovalRequest: IdleSessionRemovalSelection?
     @ObservationIgnored
     nonisolated(unsafe) private var saveTimer: Timer?
     /// Session discovery: the session-store watcher and the scans it runs off
@@ -901,8 +912,9 @@ final class AppState {
 
     /// Remove a session, clean up its monitor, and resume any pending continuations.
     /// Every removal path (cleanup timer, process exit, reducer effect) goes through here
-    /// so leaked continuations / connections are impossible.
-    func removeSession(_ sessionId: String) {
+    /// so leaked continuations / connections are impossible. Atomic batch removals defer
+    /// derived-state work with `refresh: false`, then refresh once after the whole group is gone.
+    func removeSession(_ sessionId: String, refresh: Bool = true) {
         let displayOnlyWaitBefore = displayOnlyWaitKind(forSession: sessionId)
         // Resume ALL pending continuations for this session
         drainPermissions(forSession: sessionId, reason: "removeSession")
@@ -921,6 +933,13 @@ final class AppState {
                 _ = showNextPending()
             }
         }
+        // An AiWork card that comes back is hydrated (title, folder, client)
+        // again, whichever way it went — not only through the AiWork sweeps.
+        if sessionId.hasPrefix(Self.aiworkSessionPrefix) {
+            forgetAiWorkHydrateState(
+                sessions[sessionId]?.providerSessionId ?? String(sessionId.dropFirst(Self.aiworkSessionPrefix.count))
+            )
+        }
         sessions.removeValue(forKey: sessionId)
         noteDisplayOnlyWait(sessionId: sessionId, was: displayOnlyWaitBefore)
         stopMonitor(sessionId)
@@ -936,9 +955,127 @@ final class AppState {
         if activeSessionId == sessionId {
             activeSessionId = mostActiveSessionId()
         }
+        if refresh {
+            startRotationIfNeeded()
+            refreshDerivedState()
+            scheduleSave()
+        }
+    }
+
+    /// Parent/child cards form one removal unit. Any live work or pending
+    /// interaction retains the whole connected group.
+    var idleSessionRemovalSelection: IdleSessionRemovalSelection {
+        let blocked = Set(permissionQueue.map { $0.event.sessionId ?? "default" }
+            + questionQueue.map { $0.event.sessionId ?? "default" })
+        return IdleSessionRemovalPolicy.selection(sessions: sessions, blockedSessionIDs: blocked)
+    }
+
+    func validatedIdleSessionRemovalSelection(
+        _ requested: IdleSessionRemovalSelection
+    ) -> IdleSessionRemovalSelection {
+        // Preserve only exact groups captured when confirmation opened. A new child or a status
+        // change retains the original group, while unrelated sessions that later become idle stay put.
+        let current = idleSessionRemovalSelection
+        let requestedGroups = Set(requested.groups)
+        return IdleSessionRemovalSelection(groups: current.groups.filter(requestedGroups.contains))
+    }
+
+    /// The header button: ask to confirm removing the idle cards it would
+    /// remove now — or, with the banner up, put the banner away. A request
+    /// with nothing left to show (its cards came back) counts as no banner.
+    func toggleIdleSessionRemovalRequest() {
+        if pendingIdleSessionRemoval != nil {
+            idleSessionRemovalRequest = nil
+            return
+        }
+        let selection = surface == .sessionList ? idleSessionRemovalSelection : .empty
+        idleSessionRemovalRequest = selection.isEmpty ? nil : selection
+    }
+
+    /// What the banner offers to remove right now: the request's groups that
+    /// are still removable exactly as they were. nil: no banner.
+    var pendingIdleSessionRemoval: IdleSessionRemovalSelection? {
+        guard let request = idleSessionRemovalRequest else { return nil }
+        let current = validatedIdleSessionRemovalSelection(request)
+        return current.isEmpty ? nil : current
+    }
+
+    func confirmIdleSessionRemoval() {
+        guard let request = idleSessionRemovalRequest else { return }
+        idleSessionRemovalRequest = nil
+        removeIdleSessions(selection: request)
+    }
+
+    func cancelIdleSessionRemoval() {
+        idleSessionRemovalRequest = nil
+    }
+
+    func removeIdleSessions(selection requested: IdleSessionRemovalSelection? = nil) {
+        let selection = requested.map(validatedIdleSessionRemovalSelection) ?? idleSessionRemovalSelection
+        guard !selection.isEmpty else { return }
+        let now = Date()
+        for group in selection.groups {
+            for id in group {
+                manuallyRemovedSessions[id] = now
+                manuallyRemovedSessionPeers[id] = group
+            }
+            for id in group.sorted() {
+                followUps.completionSeen(sessionId: id)
+                removeSession(id, refresh: false)
+            }
+        }
+        // Tombstones need only cover recent passive callbacks and must not grow for the app's lifetime.
+        if manuallyRemovedSessions.count > 1024 {
+            let oldest = manuallyRemovedSessions.sorted { $0.value < $1.value }
+                .prefix(manuallyRemovedSessions.count - 1024)
+            for entry in oldest {
+                manuallyRemovedSessions.removeValue(forKey: entry.key)
+                manuallyRemovedSessionPeers.removeValue(forKey: entry.key)
+            }
+        }
         startRotationIfNeeded()
         refreshDerivedState()
         scheduleSave()
+    }
+
+    /// Whether an input may bring back a card the user removed. Any input may
+    /// for a card that was not removed. A removed card comes back — its whole
+    /// group with it — for work; passive input (a store snapshot, a hook
+    /// trailing the finished turn, a delayed read) leaves it away, and so does
+    /// work observed (`observedAt`) no later than the removal: a scan that
+    /// started before the click.
+    ///
+    /// A card back on the island by any other way (a fold creating its parent,
+    /// a request) makes the tombstone moot: its later hooks must reach it.
+    @discardableResult
+    func shouldAdmitRemovedSession(
+        _ sessionId: String,
+        evidence: RemovedSessionRevivalEvidence,
+        observedAt: Date? = nil
+    ) -> Bool {
+        guard let removedAt = manuallyRemovedSessions[sessionId] else { return true }
+        if sessions[sessionId] == nil {
+            switch evidence {
+            case .passive:
+                return false
+            case .activeWork:
+                if let observedAt, observedAt <= removedAt { return false }
+            case .blockingRequest:
+                break
+            }
+        }
+        let group = manuallyRemovedSessionPeers[sessionId] ?? [sessionId]
+        for member in group {
+            manuallyRemovedSessions.removeValue(forKey: member)
+            manuallyRemovedSessionPeers.removeValue(forKey: member)
+        }
+        return true
+    }
+
+    /// A request an agent blocks on — a permission, a question — always
+    /// surfaces, on a removed card too: it brings the card's group back.
+    func reviveRemovedSession(_ sessionId: String) {
+        shouldAdmitRemovedSession(sessionId, evidence: .blockingRequest)
     }
 
     // MARK: - Compact bar mascot rotation
@@ -1413,6 +1550,11 @@ final class AppState {
         if primarySource != effectiveSource { primarySource = effectiveSource }
         if activeSessionCount != summary.activeSessionCount { activeSessionCount = summary.activeSessionCount }
         if totalSessionCount != summary.totalSessionCount { totalSessionCount = summary.totalSessionCount }
+        // A banner whose cards all came back to life asks nothing any more:
+        // it must not reappear if they go idle again later.
+        if idleSessionRemovalRequest != nil, pendingIdleSessionRemoval == nil {
+            idleSessionRemovalRequest = nil
+        }
         ESP32StatePublisher.shared.notifyDirty()
         AppleCompanionPublisher.shared.notifyDirty()
     }
@@ -1524,6 +1666,10 @@ final class AppState {
 
         let sessionId = event.sessionId ?? "default"
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
+        guard shouldAdmitRemovedSession(
+            sessionId,
+            evidence: .forHookEvent(event, normalizedEventName: normalizedEventName)
+        ) else { return }
 
         // Account chatter, not session activity. CodeBuddy fires
         // Notification(auth_success) as the CLI boots — before SessionStart and
@@ -1913,6 +2059,7 @@ final class AppState {
         hookConnectionId: UUID? = nil
     ) {
         let sessionId = event.sessionId ?? "default"
+        reviveRemovedSession(sessionId)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -2331,6 +2478,7 @@ final class AppState {
         hookConnectionId: UUID? = nil
     ) {
         let sessionId = event.sessionId ?? "default"
+        reviveRemovedSession(sessionId)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -2388,6 +2536,7 @@ final class AppState {
         hookConnectionId: UUID? = nil
     ) {
         let sessionId = event.sessionId ?? "default"
+        reviveRemovedSession(sessionId)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -3322,6 +3471,11 @@ final class AppState {
     func integrateDiscovered(_ discovered: [DiscoveredSession]) {
         var didMutate = false
         for info in discovered {
+            guard shouldAdmitRemovedSession(
+                info.sessionId,
+                evidence: info.status.map { $0 == .idle ? .passive : .activeWork } ?? .passive,
+                observedAt: info.modifiedAt
+            ) else { continue }
             if shouldSuppressClosedCodexDesktopDiscovery(info) {
                 continue
             }

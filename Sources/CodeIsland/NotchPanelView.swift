@@ -130,11 +130,15 @@ struct NotchPanelView: View {
     @AppStorage(SettingsKey.showSessionRecap) private var showSessionRecap = SettingsDefaults.showSessionRecap
     @AppStorage(SettingsKey.hoverExpandDelay) private var hoverExpandDelay = SettingsDefaults.hoverExpandDelay
     @AppStorage(SettingsKey.showProjectName) private var showProjectName = SettingsDefaults.showProjectName
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Delayed hover: prevents accidental expansion when mouse passes through
     @State private var hoverTimer: Timer?
     @State private var isHovered = false
     @State private var idleHovered = false
+    /// The remove-idle banner's height while it is up, which the session list
+    /// gives up (its estimate until the first layout measures it).
+    @State private var removalBannerHeight: CGFloat = 50
     /// Three-stage hover: collapsed → prehover (immediate ack) → expanded (after delay)
     @State private var hoverPhase: NotchHoverPhase = .collapsed
     /// Curtain animation for tool status toggle
@@ -386,8 +390,28 @@ struct NotchPanelView: View {
                         SessionListView(appState: appState, onlySessionId: appState.justCompletedSessionId)
                             .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .sessionList:
-                        SessionListView(appState: appState, onlySessionId: nil)
-                            .transition(.blurFade.combined(with: .move(edge: .top)))
+                        VStack(spacing: 0) {
+                            // Only what is still removable as it was when the
+                            // button was clicked: the count follows, and the
+                            // banner goes once nothing is left to remove.
+                            let pending = appState.pendingIdleSessionRemoval
+                            if let pending {
+                                IdleSessionRemovalBanner(
+                                    count: pending.cardCount,
+                                    onCancel: appState.cancelIdleSessionRemoval,
+                                    onRemove: appState.confirmIdleSessionRemoval
+                                )
+                                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { removalBannerHeight = $0 }
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+                            SessionListView(
+                                appState: appState,
+                                onlySessionId: nil,
+                                reservedHeight: pending == nil ? 0 : removalBannerHeight
+                            )
+                        }
+                        .animation(reduceMotion ? nil : NotchAnimation.micro, value: appState.pendingIdleSessionRemoval != nil)
+                        .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .collapsed:
                         EmptyView()
                     }
@@ -796,7 +820,7 @@ private struct CompactRightWing: View {
     var body: some View {
         HStack(spacing: 6) {
             if expanded {
-                ExpandedHeaderControls(soundEnabled: $soundEnabled)
+                ExpandedHeaderControls(appState: appState, soundEnabled: $soundEnabled)
             } else {
                 // Quiet hours active — explains why event sounds are silent.
                 if inQuietHours {
@@ -1079,9 +1103,11 @@ struct NotchIconButton: View {
     let icon: String
     var tint: Color = .white
     var tooltip: String? = nil
+    var accessibilityTitle: String? = nil
     let action: () -> Void
     @State private var hovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     /// The drawn circle, and the hit target around it.
     static let circleSize: CGFloat = 22
@@ -1091,13 +1117,13 @@ struct NotchIconButton: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(tint.opacity(hovering ? 1.0 : 0.85))
+                .foregroundStyle(tint.opacity(isEnabled ? (hovering ? 1.0 : 0.85) : 0.3))
                 .frame(width: Self.circleSize, height: Self.circleSize)
                 .background(
                     Circle()
-                        .fill(tint.opacity(hovering ? 0.2 : 0.08))
+                        .fill(tint.opacity(isEnabled && hovering ? 0.2 : 0.08))
                 )
-                .scaleEffect(hovering && !reduceMotion ? 1.1 : 1.0)
+                .scaleEffect(isEnabled && hovering && !reduceMotion ? 1.1 : 1.0)
                 .frame(width: Self.hitSize, height: Self.hitSize)
                 .contentShape(Rectangle())
         }
@@ -1106,20 +1132,41 @@ struct NotchIconButton: View {
         .help(tooltip ?? "")
         // Icon-only: VoiceOver would otherwise read the symbol name
         // ("gearshape"), in English, instead of what the button does.
-        .accessibilityLabel(tooltip ?? icon)
+        .accessibilityLabel(accessibilityTitle ?? tooltip ?? icon)
     }
 }
 
-/// The expanded header's buttons: sound, Settings, and Quit, which asks once.
+/// The expanded header's buttons: remove idle cards (on the session list,
+/// while it has some), sound, Settings, and Quit, which asks once.
 private struct ExpandedHeaderControls: View {
+    var appState: AppState
     @Binding var soundEnabled: Bool
     @StateObject private var quit = QuitConfirmation()
     @ObservedObject private var l10n = L10n.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// Only where it can act: an approval, question or completion card has
+    /// nothing to remove, and a greyed-out trash can there only raised the
+    /// question why. It leads the row, so coming and going moves nothing else.
+    /// (The banner's cards are a subset of these, so it never outlives the button.)
+    private var showsRemoveIdle: Bool {
+        appState.surface == .sessionList && !appState.idleSessionRemovalSelection.isEmpty
+    }
+
     var body: some View {
         // 4pt between 24pt hit targets keeps the 6pt gap between the circles.
         HStack(spacing: 4) {
+            if showsRemoveIdle {
+                // Tinted like the banner while it is up; a second click puts it away.
+                NotchIconButton(icon: "trash",
+                                tint: appState.pendingIdleSessionRemoval != nil ? IdleSessionRemovalBanner.tint : .white,
+                                tooltip: l10n["remove_idle_sessions_help"],
+                                accessibilityTitle: l10n["remove_idle_sessions"]) {
+                    appState.toggleIdleSessionRemovalRequest()
+                }
+                .accessibilityIdentifier("removeIdleSessions")
+                .transition(.opacity)
+            }
             NotchIconButton(icon: soundEnabled ? "speaker.wave.2" : "speaker.slash", tooltip: soundEnabled ? l10n["mute"] : l10n["enable_sound_tooltip"]) {
                 soundEnabled.toggle()
             }
@@ -1131,6 +1178,7 @@ private struct ExpandedHeaderControls: View {
         // The pill is wider than the icon: the other buttons slide over to
         // make room, or with Reduce Motion simply move.
         .animation(reduceMotion ? nil : NotchAnimation.micro, value: quit.isArmed)
+        .animation(reduceMotion ? nil : NotchAnimation.micro, value: showsRemoveIdle)
     }
 }
 
@@ -2864,6 +2912,10 @@ private struct SessionListView: View {
     var appState: AppState
     /// When set, only show this session (auto-expand on completion)
     var onlySessionId: String? = nil
+    /// Height the panel shows above the list inside the window's budget (the
+    /// remove-idle banner): the list scrolls that much sooner, so its footer
+    /// and the panel's bottom stay in the window.
+    var reservedHeight: CGFloat = 0
     @AppStorage(SettingsKey.sessionGroupingMode) private var groupingMode = SettingsDefaults.sessionGroupingMode
     @AppStorage(SettingsKey.maxVisibleSessions) private var maxVisibleSessions = SettingsDefaults.maxVisibleSessions
     @AppStorage(SettingsKey.showUsageStats) private var showUsageStats = SettingsDefaults.showUsageStats
@@ -2980,7 +3032,7 @@ private struct SessionListView: View {
         let needsScroll = SessionListMetrics.needsScroll(
             isCompletionCard: onlySessionId != nil,
             sessionCount: totalSessionCount,
-            contentHeight: contentHeight,
+            contentHeight: contentHeight + reservedHeight,
             maxVisibleSessions: maxVisibleSessions,
             density: density
         )
@@ -3072,7 +3124,7 @@ private struct SessionListView: View {
 
         VStack(spacing: 0) {
             if needsScroll {
-                ThinScrollView(maxHeight: SessionListMetrics.scrollHeight(maxVisibleSessions: maxVisibleSessions)) {
+                ThinScrollView(maxHeight: SessionListMetrics.scrollHeight(maxVisibleSessions: maxVisibleSessions) - reservedHeight) {
                     content
                 }
                 .clipShape(
@@ -3717,6 +3769,14 @@ private struct ThinScrollView<Content: View>: NSViewRepresentable {
     let maxHeight: CGFloat
     @ViewBuilder let content: Content
 
+    /// The height cap, kept so it can follow `maxHeight` (the session list
+    /// gives up room to the remove-idle banner while it is up).
+    final class Coordinator {
+        var maxHeightConstraint: NSLayoutConstraint?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     /// AppKit puts the system's preferred style back (legacy with a mouse
     /// attached or "Show scroll bars: Always") on its own schedule; a legacy
     /// scroller took 13pt off the session list's width until the next update.
@@ -3740,10 +3800,12 @@ private struct ThinScrollView<Content: View>: NSViewRepresentable {
         scrollView.documentView = hosting
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        let maxHeightConstraint = scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: maxHeight)
+        context.coordinator.maxHeightConstraint = maxHeightConstraint
         NSLayoutConstraint.activate([
             hosting.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             hosting.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: maxHeight),
+            maxHeightConstraint,
         ])
 
         return scrollView
@@ -3752,6 +3814,9 @@ private struct ThinScrollView<Content: View>: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         if let hosting = scrollView.documentView as? NSHostingView<Content> {
             hosting.rootView = content
+        }
+        if let constraint = context.coordinator.maxHeightConstraint, constraint.constant != maxHeight {
+            constraint.constant = maxHeight
         }
         scrollView.scrollerStyle = .overlay
         scrollView.verticalScroller?.controlSize = .mini
