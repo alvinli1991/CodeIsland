@@ -67,6 +67,7 @@ final class L10n: ObservableObject {
         "display": "Display",
         "auto": "Auto",
         "builtin_display": "Built-in Display",
+        "display_not_connected": "Pinned display (not connected)",
         "notch": "(Notch)",
 
         // Behavior
@@ -669,6 +670,7 @@ final class L10n: ObservableObject {
         "display": "Display",
         "auto": "Automatisch",
         "builtin_display": "Integriertes Display",
+        "display_not_connected": "Festgelegtes Display (nicht verbunden)",
         "notch": "(Notch)",
 
         // Behavior
@@ -1271,6 +1273,7 @@ final class L10n: ObservableObject {
         "display": "显示器",
         "auto": "自动",
         "builtin_display": "内建显示器",
+        "display_not_connected": "已固定的显示器（未连接）",
         "notch": "(刘海)",
 
         // Behavior
@@ -1873,6 +1876,7 @@ final class L10n: ObservableObject {
         "display": "顯示器",
         "auto": "自動",
         "builtin_display": "內建顯示器",
+        "display_not_connected": "已固定的顯示器（未連接）",
         "notch": "(瀏海)",
 
         // Behavior
@@ -2475,6 +2479,7 @@ final class L10n: ObservableObject {
         "display": "ディスプレイ",
         "auto": "自動",
         "builtin_display": "内蔵ディスプレイ",
+        "display_not_connected": "固定したディスプレイ（未接続）",
         "notch": "(ノッチ)",
 
         // Behavior
@@ -3077,6 +3082,7 @@ final class L10n: ObservableObject {
         "display": "디스플레이",
         "auto": "자동",
         "builtin_display": "내장 디스플레이",
+        "display_not_connected": "고정한 디스플레이 (연결되지 않음)",
         "notch": "(노치)",
 
         // Behavior
@@ -3679,6 +3685,7 @@ final class L10n: ObservableObject {
         "display": "Ekran",
         "auto": "Otomatik",
         "builtin_display": "Dahili Ekran",
+        "display_not_connected": "Sabitlenen ekran (bağlı değil)",
         "notch": "(Çentik)",
 
         // Behavior

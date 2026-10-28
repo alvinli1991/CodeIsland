@@ -328,6 +328,9 @@ class PanelWindowController: NSObject, NSWindowDelegate {
                 // Rebuild again after a short delay to pick up the final screen configuration.
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 self?.refreshCurrentScreen(forceRebuild: true)
+                // A pinned display that went away leaves the island to Auto
+                // until it is back.
+                self?.configureAutoScreenPolling()
             }
         }
 
@@ -544,7 +547,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         autoScreenPoller?.invalidate()
         autoScreenPoller = nil
 
-        guard SettingsManager.shared.displayChoice == "auto" else { return }
+        guard !isPinnedToConnectedDisplay else { return }
 
         // Screen-parameter / Space-change / frontmost-app notifications already cover the
         // common cases. This poller is a fallback for the rare path where a window is
@@ -651,17 +654,34 @@ class PanelWindowController: NSObject, NSWindowDelegate {
 
     /// Choose which screen to display on based on displayChoice setting
     private func chosenScreen() -> NSScreen {
+        let screens = NSScreen.screens
+        let uuids = screens.map(ScreenDetector.displayUUID(for:))
         let choice = SettingsManager.shared.displayChoice
 
-        // Handle specific screen index: "screen_0", "screen_1", etc.
-        if choice.hasPrefix("screen_"),
-           let index = Int(choice.dropFirst(7)),
-           index < NSScreen.screens.count {
-            return NSScreen.screens[index]
+        // A pin saved as a screen index takes its display's UUID the first
+        // time it resolves; the display it names doesn't change.
+        if let migrated = DisplayChoice.migrated(choice, displayUUIDs: uuids) {
+            lastDisplayChoice = migrated
+            SettingsManager.shared.displayChoice = migrated
+        }
+        if case .pinned(let index) = DisplayChoice.resolve(choice, displayUUIDs: uuids) {
+            return screens[index]
         }
 
-        // "auto" — prefer notch screen, fallback to main
+        // Auto — prefer the active work screen, then notch, then main. A
+        // pinned display that isn't connected gets the same, and its pin
+        // stays for when it comes back.
         return ScreenDetector.preferredScreen
+    }
+
+    /// Whether the island stays on a pinned display, connected now; Auto
+    /// (and a missing pin) follows the window in front.
+    private var isPinnedToConnectedDisplay: Bool {
+        let uuids = NSScreen.screens.map(ScreenDetector.displayUUID(for:))
+        if case .pinned = DisplayChoice.resolve(SettingsManager.shared.displayChoice, displayUUIDs: uuids) {
+            return true
+        }
+        return false
     }
 
     /// Poll every 1.5s while in fullscreen; stop when fullscreen ends

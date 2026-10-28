@@ -365,6 +365,19 @@ private struct GeneralPage: View {
         _launchAtLogin = State(initialValue: SettingsManager.shared.launchAtLogin)
     }
 
+    /// The stored choice as the picker's rows name it: a pin saved as a
+    /// screen index selects its display's row.
+    private var displayChoiceSelection: Binding<String> {
+        Binding(
+            get: {
+                DisplayChoice.pickerSelection(
+                    displayChoice, displayUUIDs: NSScreen.screens.map(ScreenDetector.displayUUID(for:))
+                )
+            },
+            set: { displayChoice = $0 }
+        )
+    }
+
     var body: some View {
         Form {
             Section {
@@ -395,13 +408,18 @@ private struct GeneralPage: View {
                 Text(l10n["avoid_menu_bar_icons_desc"])
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Picker(l10n["display"], selection: $displayChoice) {
-                    Text(l10n["auto"]).tag("auto")
+                Picker(l10n["display"], selection: displayChoiceSelection) {
+                    let uuids = NSScreen.screens.map(ScreenDetector.displayUUID(for:))
+                    Text(l10n["auto"]).tag(DisplayChoice.auto)
                     ForEach(Array(NSScreen.screens.enumerated()), id: \.offset) { index, screen in
                         let name = screen.localizedName
                         let isBuiltin = name.contains("Built-in") || name.contains("内置")
                         let label = isBuiltin ? l10n["builtin_display"] : name
-                        Text(label).tag("screen_\(index)")
+                        Text(label).tag(DisplayChoice.tag(forDisplayAt: index, displayUUIDs: uuids))
+                    }
+                    // The pin stays while its display is away; so does its row.
+                    if DisplayChoice.resolve(displayChoice, displayUUIDs: uuids) == .pinnedDisplayMissing {
+                        Text(l10n["display_not_connected"]).tag(displayChoice)
                     }
                 }
             }

@@ -193,6 +193,14 @@ struct ScreenDetector {
         return fakeNotchWidth(for: screen)
     }
 
+    /// The display's own identity. It stays with the display across
+    /// reconnects and rearrangements, unlike its place in `NSScreen.screens`.
+    static func displayUUID(for screen: NSScreen) -> String? {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+              let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value)?.takeRetainedValue() else { return nil }
+        return CFUUIDCreateString(nil, uuid) as String
+    }
+
     static func signature(for screen: NSScreen) -> String {
         let frame = screen.frame.integral
         return "\(Int(frame.origin.x)):\(Int(frame.origin.y)):\(Int(frame.width)):\(Int(frame.height))"
@@ -245,5 +253,80 @@ struct ScreenDetector {
         }
 
         return nil
+    }
+}
+
+/// Settings → General → Display: Auto, or the display the island is pinned to.
+///
+/// A pin names the display by its UUID ("display:<UUID>"). It used to name
+/// an index into `NSScreen.screens` ("screen_<index>"), whose order follows
+/// the primary display, so making another display the primary one or
+/// reconnecting monitors silently moved the island to another display. A
+/// legacy value still resolves as it did, and becomes the display's UUID
+/// the first time it resolves.
+enum DisplayChoice {
+    static let auto = "auto"
+    private static let pinPrefix = "display:"
+    private static let legacyPrefix = "screen_"
+
+    enum Resolution: Equatable {
+        /// Auto, or a value this version doesn't know.
+        case auto
+        /// Pinned to the display at this index of `NSScreen.screens`.
+        case pinned(index: Int)
+        /// Pinned to a display that isn't connected. Auto's choice stands
+        /// in, and the pin stays: the island goes back when it returns.
+        case pinnedDisplayMissing
+    }
+
+    /// `displayUUIDs`: the connected displays' UUIDs in `NSScreen.screens`
+    /// order, nil for a display without one.
+    static func resolve(_ choice: String, displayUUIDs: [String?]) -> Resolution {
+        if let uuid = pinnedUUID(choice) {
+            guard let index = displayUUIDs.firstIndex(of: uuid) else { return .pinnedDisplayMissing }
+            return .pinned(index: index)
+        }
+        if let index = legacyIndex(choice) {
+            return index < displayUUIDs.count ? .pinned(index: index) : .pinnedDisplayMissing
+        }
+        return .auto
+    }
+
+    /// What to store in place of a legacy index pin that resolves now: the
+    /// UUID pin of the display it names. Nil for anything else.
+    static func migrated(_ choice: String, displayUUIDs: [String?]) -> String? {
+        guard let index = legacyIndex(choice), index < displayUUIDs.count,
+              let uuid = displayUUIDs[index] else { return nil }
+        return pinPrefix + uuid
+    }
+
+    /// The picker tag of the connected display at `index`: its UUID pin, or
+    /// its index for a display without a UUID.
+    static func tag(forDisplayAt index: Int, displayUUIDs: [String?]) -> String {
+        if let uuid = displayUUIDs[index] { return pinPrefix + uuid }
+        return legacyPrefix + String(index)
+    }
+
+    /// The picker row a stored choice selects: a legacy pin selects its
+    /// display's row, and a pin to a display that isn't connected selects
+    /// a row of its own.
+    static func pickerSelection(_ choice: String, displayUUIDs: [String?]) -> String {
+        switch resolve(choice, displayUUIDs: displayUUIDs) {
+        case .auto: return auto
+        case .pinned(let index): return tag(forDisplayAt: index, displayUUIDs: displayUUIDs)
+        case .pinnedDisplayMissing: return choice
+        }
+    }
+
+    private static func pinnedUUID(_ choice: String) -> String? {
+        guard choice.hasPrefix(pinPrefix) else { return nil }
+        let uuid = String(choice.dropFirst(pinPrefix.count))
+        return uuid.isEmpty ? nil : uuid
+    }
+
+    private static func legacyIndex(_ choice: String) -> Int? {
+        guard choice.hasPrefix(legacyPrefix), let index = Int(choice.dropFirst(legacyPrefix.count)),
+              index >= 0 else { return nil }
+        return index
     }
 }
