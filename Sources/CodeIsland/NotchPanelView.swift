@@ -3062,6 +3062,10 @@ private struct SessionListView: View {
                 CompactSessionRowMetrics.statusColumnWidth(fontSize: CompactSessionRowMetrics.statusFontSize(fontSize))
             )
             : (0, 0)
+        // While the remove-idle banner asks, the cards it would take are marked.
+        let markedForRemoval = onlySessionId == nil
+            ? appState.pendingIdleSessionRemoval?.sessionIDs ?? []
+            : []
         let content = VStack(spacing: density == .compact ? CompactSessionRowMetrics.spacing : 6) {
             ForEach(groups, id: \.header) { group in
                 if !group.header.isEmpty {
@@ -3083,6 +3087,7 @@ private struct SessionListView: View {
 
                 ForEach(group.ids, id: \.self) { sessionId in
                     if let session = appState.sessions[sessionId] {
+                        let marked = markedForRemoval.contains(sessionId)
                         SessionCard(
                             appState: appState,
                             sessionId: sessionId,
@@ -3090,8 +3095,11 @@ private struct SessionListView: View {
                             isCompletion: onlySessionId != nil,
                             density: density,
                             compactProjectWidth: compactColumns.project,
-                            compactStatusWidth: compactColumns.status
+                            compactStatusWidth: compactColumns.status,
+                            markedForRemoval: marked
                         )
+                        .opacity(marked ? 0.6 : 1)
+                        .accessibilityHint(marked ? Text(L10n.shared["remove_idle_sessions_marked"]) : Text(""))
                     }
                 }
             }
@@ -4184,6 +4192,8 @@ private struct SessionCard: View {
     /// Compact rows: column widths every row shares, so the words line up.
     var compactProjectWidth: CGFloat = 150
     var compactStatusWidth: CGFloat = 64
+    /// The remove-idle banner is up and would take this card.
+    var markedForRemoval = false
     @State private var hovering = false
     @State private var failureShakeOffset: CGFloat = 0
     @State private var jumpValidationTask: Task<Void, Never>?
@@ -4732,6 +4742,12 @@ private struct SessionCard: View {
                 .frame(width: 3)
         }
         .clipShape(shape)
+        .overlay {
+            if markedForRemoval {
+                shape.strokeBorder(IdleSessionRemovalBanner.tint.opacity(0.8),
+                                   style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            }
+        }
         .accessibilityHidden(true)
     }
 
