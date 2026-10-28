@@ -332,4 +332,99 @@ final class AppStateIdleSessionRemovalTests: XCTestCase {
 
         XCTAssertTrue(app.beginAiWorkHydrateAttempt(daemonId))
     }
+
+    // MARK: - The confirmation banner
+
+    func testTheBannerAsksOnlyOnTheSessionListAndGoesWithIt() {
+        let app = AppState()
+        app.sessions = ["idle": session(.idle), "running": session(.running)]
+        app.surface = .completionCard(sessionId: "idle")
+        app.toggleIdleSessionRemovalRequest()
+        XCTAssertNil(app.idleSessionRemovalRequest)
+
+        app.surface = .sessionList
+        app.toggleIdleSessionRemovalRequest()
+        XCTAssertEqual(app.pendingIdleSessionRemoval?.sessionIDs, ["idle"])
+
+        app.surface = .collapsed
+        XCTAssertNil(app.idleSessionRemovalRequest)
+        XCTAssertEqual(Set(app.sessions.keys), ["idle", "running"])
+    }
+
+    func testTheButtonAgainPutsTheBannerAway() {
+        let app = AppState()
+        app.sessions = ["idle": session(.idle)]
+        app.surface = .sessionList
+        app.toggleIdleSessionRemovalRequest()
+        XCTAssertNotNil(app.pendingIdleSessionRemoval)
+
+        app.toggleIdleSessionRemovalRequest()
+
+        XCTAssertNil(app.idleSessionRemovalRequest)
+        XCTAssertNotNil(app.sessions["idle"])
+    }
+
+    /// Before the next refresh drops a request whose cards all came back, a
+    /// click must open a banner for what is idle now, not just clear it.
+    func testTheButtonAsksAfreshOverARequestWhoseCardsCameBack() {
+        let app = AppState()
+        app.sessions = ["a": session(.idle), "b": session(.running)]
+        app.surface = .sessionList
+        app.toggleIdleSessionRemovalRequest()
+        app.sessions["a"]?.status = .running
+        app.sessions["b"]?.status = .idle
+        XCTAssertNil(app.pendingIdleSessionRemoval)
+
+        app.toggleIdleSessionRemovalRequest()
+
+        XCTAssertEqual(app.pendingIdleSessionRemoval?.sessionIDs, ["b"])
+    }
+
+    func testConfirmingRemovesOnlyWhatIsStillIdle() {
+        let app = AppState()
+        app.sessions = ["a": session(.idle), "b": session(.idle), "running": session(.running)]
+        app.surface = .sessionList
+        app.toggleIdleSessionRemovalRequest()
+        app.sessions["b"]?.status = .processing
+
+        XCTAssertEqual(app.pendingIdleSessionRemoval?.cardCount, 1)
+        app.confirmIdleSessionRemoval()
+
+        XCTAssertEqual(Set(app.sessions.keys), ["b", "running"])
+        XCTAssertNil(app.idleSessionRemovalRequest)
+    }
+
+    func testABannerWhoseCardsCameBackDoesNotReturnWhenTheyGoIdleAgain() {
+        let app = AppState()
+        app.sessions = ["a": session(.idle)]
+        app.surface = .sessionList
+        app.toggleIdleSessionRemovalRequest()
+        app.sessions["a"]?.status = .running
+        XCTAssertNil(app.pendingIdleSessionRemoval)
+        app.refreshDerivedState()
+
+        app.sessions["a"]?.status = .idle
+        app.refreshDerivedState()
+
+        XCTAssertNil(app.pendingIdleSessionRemoval, "the click was about a card that has worked since")
+    }
+
+    func testARequestWhileTheBannerIsUpKeepsItsCard() async throws {
+        let app = AppState()
+        app.sessions = ["asker": session(.idle), "other": session(.idle)]
+        let selection = app.idleSessionRemovalSelection
+        let request = try hook([
+            "hook_event_name": "PermissionRequest", "session_id": "asker",
+            "tool_name": "Bash", "tool_input": ["command": "make deploy"],
+        ])
+        let response = await startHookRequest { app.handlePermissionRequest(request, continuation: $0) }
+        app.sessions["asker"]?.status = .idle
+
+        app.removeIdleSessions(selection: selection)
+
+        XCTAssertNotNil(app.sessions["asker"])
+        XCTAssertNil(app.sessions["other"])
+        app.denyPermission(expectedSessionId: "asker")
+        _ = try await awaitValue(of: response)
+    }
 }

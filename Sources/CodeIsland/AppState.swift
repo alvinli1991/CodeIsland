@@ -240,6 +240,9 @@ final class AppState {
             if surface != oldValue {
                 followUps.surfaceChanged(surface)
             }
+            if surface != .sessionList, idleSessionRemovalRequest != nil {
+                idleSessionRemovalRequest = nil
+            }
             switch surface {
             case .approvalCard(let sid): cardRequestId = pendingPermission(forSession: sid)?.id
             case .questionCard(let sid): cardRequestId = pendingQuestion(forSession: sid)?.id
@@ -334,6 +337,10 @@ final class AppState {
     @ObservationIgnored var manuallyRemovedSessions: [String: Date] = [:]
     /// The connected group recorded at removal time; real activity revives all of its members together.
     @ObservationIgnored private var manuallyRemovedSessionPeers: [String: Set<String>] = [:]
+    /// The idle cards the session list's banner asks the user to confirm
+    /// removing, as they were when the header button was clicked. nil: no
+    /// banner. Leaving the list, or nothing in it staying removable, drops it.
+    var idleSessionRemovalRequest: IdleSessionRemovalSelection?
     @ObservationIgnored
     nonisolated(unsafe) private var saveTimer: Timer?
     /// Session discovery: the session-store watcher and the scans it runs off
@@ -968,6 +975,36 @@ final class AppState {
         return IdleSessionRemovalSelection(groups: current.groups.filter(requestedGroups.contains))
     }
 
+    /// The header button: ask to confirm removing the idle cards it would
+    /// remove now — or, with the banner up, put the banner away. A request
+    /// with nothing left to show (its cards came back) counts as no banner.
+    func toggleIdleSessionRemovalRequest() {
+        if pendingIdleSessionRemoval != nil {
+            idleSessionRemovalRequest = nil
+            return
+        }
+        let selection = surface == .sessionList ? idleSessionRemovalSelection : .empty
+        idleSessionRemovalRequest = selection.isEmpty ? nil : selection
+    }
+
+    /// What the banner offers to remove right now: the request's groups that
+    /// are still removable exactly as they were. nil: no banner.
+    var pendingIdleSessionRemoval: IdleSessionRemovalSelection? {
+        guard let request = idleSessionRemovalRequest else { return nil }
+        let current = validatedIdleSessionRemovalSelection(request)
+        return current.isEmpty ? nil : current
+    }
+
+    func confirmIdleSessionRemoval() {
+        guard let request = idleSessionRemovalRequest else { return }
+        idleSessionRemovalRequest = nil
+        removeIdleSessions(selection: request)
+    }
+
+    func cancelIdleSessionRemoval() {
+        idleSessionRemovalRequest = nil
+    }
+
     func removeIdleSessions(selection requested: IdleSessionRemovalSelection? = nil) {
         let selection = requested.map(validatedIdleSessionRemovalSelection) ?? idleSessionRemovalSelection
         guard !selection.isEmpty else { return }
@@ -1508,6 +1545,11 @@ final class AppState {
         if primarySource != effectiveSource { primarySource = effectiveSource }
         if activeSessionCount != summary.activeSessionCount { activeSessionCount = summary.activeSessionCount }
         if totalSessionCount != summary.totalSessionCount { totalSessionCount = summary.totalSessionCount }
+        // A banner whose cards all came back to life asks nothing any more:
+        // it must not reappear if they go idle again later.
+        if idleSessionRemovalRequest != nil, pendingIdleSessionRemoval == nil {
+            idleSessionRemovalRequest = nil
+        }
         ESP32StatePublisher.shared.notifyDirty()
         AppleCompanionPublisher.shared.notifyDirty()
     }

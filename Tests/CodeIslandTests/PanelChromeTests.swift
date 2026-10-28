@@ -319,9 +319,9 @@ final class PanelChromeTests: XCTestCase {
     func testEveryLanguageHasTheNewChromeStrings() {
         let keys = ["usage_last_5h", "usage_span", "usage_in_out", "usage_tooltip_title", "usage_tooltip_breakdown",
                     "quota_resets_in", "quit_confirm", "quit_confirm_hint", "remove_idle_sessions",
-                    "remove_idle_sessions_help", "remove_idle_sessions_confirm",
-                    "remove_idle_sessions_confirm_help", "remove_idle_sessions_cancel",
-                    "remove_idle_sessions_count", "remove_idle_sessions_remove"]
+                    "remove_idle_sessions_help", "remove_idle_sessions_confirm_help",
+                    "remove_idle_sessions_cancel", "remove_idle_sessions_count",
+                    "remove_idle_sessions_count_one", "remove_idle_sessions_remove"]
         func placeholders(_ s: String) -> [String] {
             let regex = try! NSRegularExpression(pattern: "%(\\d+\\$)?(?:@|ld)")
             return regex.matches(in: s, range: NSRange(s.startIndex..., in: s))
