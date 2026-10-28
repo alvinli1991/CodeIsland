@@ -5,7 +5,6 @@ import SwiftUI
 struct DexView: View {
     let status: MascotAgentStatus
     var size: CGFloat = 27
-    @State private var alive = false
 
     // OpenAI black & white palette — white body, black prompt
     private static let cloudC    = Color(red: 0.92, green: 0.92, blue: 0.93) // off-white
@@ -26,11 +25,6 @@ struct DexView: View {
         }
         .frame(width: size, height: size)
         .clipped()
-        .onAppear { alive = true }
-        .onChange(of: status) {
-            alive = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { alive = true }
-        }
     }
 
     // ── Coordinate helper ──
@@ -251,11 +245,7 @@ struct DexView: View {
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     private var alertScene: some View {
         ZStack {
-            Circle()
-                .fill(Self.alertC.opacity(alive ? 0.12 : 0))
-                .frame(width: size * 0.8)
-                .blur(radius: size * 0.05)
-                .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: alive)
+            MascotAlertGlow(color: Self.alertC, peak: 0.12, size: size)
 
             MascotTimeline(interval: 0.03) { t in
                 alertCanvas(t: t)

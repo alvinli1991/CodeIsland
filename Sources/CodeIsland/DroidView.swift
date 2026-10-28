@@ -5,7 +5,6 @@ import SwiftUI
 struct DroidView: View {
     let status: MascotAgentStatus
     var size: CGFloat = 27
-    @State private var alive = false
 
     // Factory brand palette — warm industrial
     private static let bodyC   = Color(red: 0.835, green: 0.416, blue: 0.149) // #D56A26 rust orange
@@ -27,11 +26,6 @@ struct DroidView: View {
         }
         .frame(width: size, height: size)
         .clipped()
-        .onAppear { alive = true }
-        .onChange(of: status) {
-            alive = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { alive = true }
-        }
     }
 
     private struct V {
@@ -216,11 +210,7 @@ struct DroidView: View {
     // ━━━━━━ ALERT ━━━━━━
     private var alertScene: some View {
         ZStack {
-            Circle()
-                .fill(Self.alertC.opacity(alive ? 0.12 : 0))
-                .frame(width: size * 0.8)
-                .blur(radius: size * 0.05)
-                .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: alive)
+            MascotAlertGlow(color: Self.alertC, peak: 0.12, size: size)
 
             MascotTimeline(interval: 0.03) { t in
                 alertCanvas(t: t)

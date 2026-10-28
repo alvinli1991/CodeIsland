@@ -5537,52 +5537,62 @@ private struct TypingIndicator: View {
     var label: String? = nil
     var bright: Bool = false
     var color: Color? = nil
-    @State private var phase: CGFloat = -60
+    /// Each indicator starts its sweep at the left edge.
+    @State private var origin = Date.timeIntervalSinceReferenceDate
+    @ObservedObject private var animationGate = MascotAnimationGate.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let sweepDuration: Double = 2.5
 
     var body: some View {
         if let label {
-            let baseColor: Color = color ?? .white
-            let baseOpacity: Double = bright ? 0.6 : 0.35
-            let peakOpacity: Double = bright ? 0.8 : 0.5
-            let midOpacity: Double = bright ? 0.5 : 0.3
-            let bandWidth: CGFloat = bright ? 80 : 60
-            let duration: Double = 2.5
-            let endPhase: CGFloat = bright ? 100 : 80
-            let startPhase: CGFloat = bright ? -80 : -60
-
-            Text(label)
-                .font(.system(size: fontSize, design: .monospaced))
-                .foregroundStyle(baseColor.opacity(baseOpacity))
-                .overlay(
-                    LinearGradient(
-                        stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .white.opacity(midOpacity), location: bright ? 0.35 : 0.4),
-                            .init(color: .white.opacity(peakOpacity), location: 0.5),
-                            .init(color: .white.opacity(midOpacity), location: bright ? 0.65 : 0.6),
-                            .init(color: .clear, location: 1),
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                    .frame(width: bandWidth)
-                    .offset(x: phase)
-                    .mask(
-                        Text(label)
-                            .font(.system(size: fontSize, design: .monospaced))
-                    )
-                )
-                .onAppear {
-                    phase = startPhase
-                    // Reduce Motion: the label stays, the endless shimmer goes.
-                    guard !reduceMotion else { return }
-                    withAnimation(.easeInOut(duration: duration).repeatForever(autoreverses: false)) {
-                        phase = endPhase
-                    }
+            // Reduce Motion, or the island's animations held (hidden, asleep):
+            // the label stays, the endless shimmer goes.
+            if animationGate.animationsActive && !reduceMotion {
+                // On the island's clock: as a repeatForever animation the sweep
+                // laid the panel out on every display frame (FrameClock).
+                FrameClock(interval: FrameTicker.step) { now in
+                    let progress = ((now - origin) / Self.sweepDuration).truncatingRemainder(dividingBy: 1)
+                    shimmer(label, sweep: MascotMotion.easeInOut(CGFloat(max(0, progress))))
                 }
-                .onDisappear { phase = startPhase }
+            } else {
+                shimmer(label, sweep: 0)
+            }
         }
+    }
+
+    /// The label with its bright band `sweep` (0…1) of the way across.
+    private func shimmer(_ label: String, sweep: CGFloat) -> some View {
+        let baseColor: Color = color ?? .white
+        let baseOpacity: Double = bright ? 0.6 : 0.35
+        let peakOpacity: Double = bright ? 0.8 : 0.5
+        let midOpacity: Double = bright ? 0.5 : 0.3
+        let bandWidth: CGFloat = bright ? 80 : 60
+        let startPhase: CGFloat = bright ? -80 : -60
+        let endPhase: CGFloat = bright ? 100 : 80
+
+        return Text(label)
+            .font(.system(size: fontSize, design: .monospaced))
+            .foregroundStyle(baseColor.opacity(baseOpacity))
+            .overlay(
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .white.opacity(midOpacity), location: bright ? 0.35 : 0.4),
+                        .init(color: .white.opacity(peakOpacity), location: 0.5),
+                        .init(color: .white.opacity(midOpacity), location: bright ? 0.65 : 0.6),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: bandWidth)
+                .offset(x: startPhase + (endPhase - startPhase) * sweep)
+                .mask(
+                    Text(label)
+                        .font(.system(size: fontSize, design: .monospaced))
+                )
+            )
     }
 }
 
