@@ -427,7 +427,7 @@ extension AppState {
            app.isHidden {
             app.unhide()
         }
-        guard let appURL = workspace.urlForApplication(withBundleIdentifier: claudeDesktopBundleId) else {
+        guard let appURL = TerminalActivator.appURL(forBundleId: claudeDesktopBundleId) else {
             return
         }
         let configuration = NSWorkspace.OpenConfiguration()

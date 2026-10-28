@@ -1391,19 +1391,30 @@ struct TerminalActivator {
     /// macOS can't deliver the link, the jump raises the app as before.
     private static func openInCodexDesktop(_ link: URL, fallbackCwd: String?) {
         let bundleId = AppState.codexAppBundleId
-        let workspace = NSWorkspace.shared
-        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first
-        guard let appURL = running?.bundleURL ?? workspace.urlForApplication(withBundleIdentifier: bundleId) else {
+        guard let codexURL = appURL(forBundleId: bundleId) else {
             activateIDEWindow(bundleId: bundleId, cwd: fallbackCwd)
             return
         }
-        if let running, running.isHidden { running.unhide() }
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first,
+           running.isHidden {
+            running.unhide()
+        }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
-        workspace.open([link], withApplicationAt: appURL, configuration: configuration) { _, error in
+        NSWorkspace.shared.open([link], withApplicationAt: codexURL, configuration: configuration) { _, error in
             guard error != nil else { return }
             DispatchQueue.main.async { activateIDEWindow(bundleId: bundleId, cwd: fallbackCwd) }
         }
+    }
+
+    /// The copy of an app to hand an open to: the one running, else the one
+    /// Launch Services prefers. Several installs can share a bundle id (an old
+    /// Codex.app next to ChatGPT.app, a beta, a second copy in Downloads), and
+    /// opening the preferred one would launch it next to the copy holding the
+    /// user's windows.
+    static func appURL(forBundleId bundleId: String) -> URL? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first?.bundleURL
+            ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
     }
 
     private static func activateByBundleId(_ bundleId: String) {
@@ -1414,7 +1425,7 @@ struct TerminalActivator {
             app.activate()
         }
         // Also use openApplication for reliable Space switching (Electron apps like VSCode)
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+        if let url = appURL(forBundleId: bundleId) {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
     }
@@ -1430,7 +1441,7 @@ struct TerminalActivator {
         }) {
             if app.isHidden { app.unhide() }
         }
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+        if let url = appURL(forBundleId: bundleId) {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
     }
@@ -1646,7 +1657,7 @@ struct TerminalActivator {
             }
 
             guard attemptsRemaining > 0 else { return }
-            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            if let url = appURL(forBundleId: bundleId) {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             }
             sendWarpGoToTabWhenFrontmost(
