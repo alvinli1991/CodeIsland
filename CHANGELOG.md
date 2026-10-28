@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.0.41] - 2026-10-28
 
 ### English
 - **The island no longer keeps a CPU core busy while its mascots move.** A moving mascot, the glow behind a waiting one, the shimmer on "Thinking…" and on a running tool's name, and the pulsing badge on the collapsed bar each asked for a redraw on every frame the display showed, and each redraw measured the whole island again: 120 times a second on a 120 Hz screen, every session card included, though the mascots only move 20 times a second. With the island open and a few sessions that took about a quarter of a core here, more on older Macs, and hovering to open it made it worse. Everything that moves now runs on one 20-frames-a-second clock and redraws only what moves: the open island does about a sixth of the work it did, the collapsed bar with a session running half, and an island with nothing running still does nothing. The behaviour previews in Settings run on the same clock (#381, thanks @finch-ift and @kuznetsov-m; #391, thanks @conghuhu)
