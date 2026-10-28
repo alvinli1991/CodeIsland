@@ -120,6 +120,54 @@ enum PanelHeightMetrics {
     }
 }
 
+/// Hide in Fullscreen's hold on the island: the latch a fullscreen app on
+/// the island's display sets, and the reveal a shortcut makes over it.
+struct PanelFullscreenHide {
+    /// The island's display shows a fullscreen app.
+    private(set) var isLatched = false
+    /// A shortcut asked for the island while the latch hid it. Hide in
+    /// Fullscreen keeps the island out of the way by itself; a key press
+    /// that asks for it gets it, until it collapses again (#384).
+    private(set) var isRevealed = false
+
+    mutating func latch() { isLatched = true }
+
+    mutating func unlatch() {
+        isLatched = false
+        isRevealed = false
+    }
+
+    mutating func reveal() {
+        if isLatched { isRevealed = true }
+    }
+
+    mutating func islandCollapsed() { isRevealed = false }
+
+    func hidesIsland(hideInFullscreen: Bool) -> Bool {
+        hideInFullscreen && isLatched && !isRevealed
+    }
+}
+
+/// Where the island is for a shortcut the user just pressed.
+enum PanelSight {
+    /// Whether the press should bring the island to the user rather than
+    /// take it as seen. It should when the island is hidden over a
+    /// fullscreen app, or up on another display than the one being worked
+    /// on — or on its way between two — with the user not on it (typing
+    /// into its card, pointing at it). Hidden for another reason — no
+    /// session running — there is nothing to bring.
+    static func isAway(
+        hiddenInFullscreen: Bool,
+        isShown: Bool,
+        userIsOnIsland: Bool,
+        isOnWorkingDisplay: @autoclosure () -> Bool
+    ) -> Bool {
+        if hiddenInFullscreen { return true }
+        guard isShown, !userIsOnIsland else { return false }
+        return !isOnWorkingDisplay()
+    }
+}
+
 @MainActor
 class PanelWindowController: NSObject, NSWindowDelegate {
     private enum ScreenHopMetrics {
@@ -180,7 +228,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     private var autoScreenPoller: Timer?
     private var fullscreenPoller: Timer?
     private var isSessionObservationArmed = false
-    private var fullscreenLatch = false
+    private var fullscreenHide = PanelFullscreenHide()
     private var settingsObservers: [NSObjectProtocol] = []
     private var globalClickMonitor: Any?
     private var lastChosenScreenSignature = ""
@@ -293,14 +341,14 @@ class PanelWindowController: NSObject, NSWindowDelegate {
                 guard let self = self else { return }
                 self.refreshCurrentScreen()
                 if self.isActiveSpaceFullscreen() {
-                    self.fullscreenLatch = true
+                    self.fullscreenHide.latch()
                     self.updateVisibility()
                     self.startFullscreenExitPoller()
                 } else {
                     // Non-fullscreen space: clear any stale latch immediately so the panel
                     // doesn't stay hidden for up to 1.5s while the exit poller catches up (#104).
-                    if self.fullscreenLatch {
-                        self.fullscreenLatch = false
+                    if self.fullscreenHide.isLatched {
+                        self.fullscreenHide.unlatch()
                         self.fullscreenPoller?.invalidate()
                         self.fullscreenPoller = nil
                     }
@@ -318,7 +366,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             Task { @MainActor in
                 guard let self = self else { return }
                 self.refreshCurrentScreen()
-                if !self.fullscreenLatch { self.updateVisibility() }
+                if !self.fullscreenHide.isLatched { self.updateVisibility() }
             }
         }
 
@@ -623,7 +671,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             Task { @MainActor in
                 guard let self = self else { timer.invalidate(); return }
                 if !self.isActiveSpaceFullscreen() {
-                    self.fullscreenLatch = false
+                    self.fullscreenHide.unlatch()
                     self.updateVisibility()
                     timer.invalidate()
                     self.fullscreenPoller = nil
@@ -636,7 +684,9 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     private func updateVisibility() {
         guard let panel = panel else { return }
         let settings = SettingsManager.shared
-        if settings.hideInFullscreen && fullscreenLatch {
+        // A shortcut's reveal lasts while the island stays open.
+        if !appState.surface.isExpanded { fullscreenHide.islandCollapsed() }
+        if fullscreenHide.hidesIsland(hideInFullscreen: settings.hideInFullscreen) {
             panel.orderOut(nil)
             MascotAnimationGate.shared.setPanelVisible(false)
             return
@@ -688,6 +738,50 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             windowListBounds: appWindows,
             primaryScreenMaxY: primaryMaxY
         )
+    }
+
+    // MARK: - Shortcuts
+
+    /// Whether the island is up on a screen, whichever display it is on: a
+    /// card on it can be seen. Hidden over a fullscreen app, it can't.
+    var isIslandOnScreen: Bool {
+        panel?.isVisible == true
+    }
+
+    /// Whether a shortcut should bring the island to the user rather than
+    /// take it as seen (`PanelSight.isAway`). With Auto, the working display
+    /// is the one of the window in front, which the island otherwise follows
+    /// only on an app switch, a Space change or a 5 s poll — not when the
+    /// user moves between two windows of one app on different displays.
+    var isIslandAwayFromUser: Bool {
+        guard let panel else { return false }
+        return PanelSight.isAway(
+            hiddenInFullscreen: fullscreenHide.hidesIsland(hideInFullscreen: SettingsManager.shared.hideInFullscreen),
+            isShown: panel.isVisible,
+            userIsOnIsland: isUserOnIsland,
+            isOnWorkingDisplay: !isAnimatingScreenHop
+                && ScreenDetector.signature(for: chosenScreen()) == lastChosenScreenSignature
+        )
+    }
+
+    /// Bring the island to the user for a shortcut they pressed: onto the
+    /// display they are working on, and up even where Hide in Fullscreen
+    /// hides it, until it collapses again. Call it once the surface the
+    /// press opened is set. (#384)
+    func bringIslandIntoSight() {
+        fullscreenHide.reveal()
+        // Typing into its card or pointing at it, the user already has it.
+        if !isUserOnIsland { refreshCurrentScreen() }
+        updateVisibility()
+    }
+
+    /// The user is on the island itself: it holds keyboard focus (they
+    /// clicked into it), or the pointer is on it. A view rebuilt mid-hover
+    /// can leave `pointerOverIsland` behind, so the window frame backs it up.
+    private var isUserOnIsland: Bool {
+        guard let panel, panel.isVisible else { return false }
+        if panel.isKeyWindow { return true }
+        return appState.followUps.pointerOverIsland && panel.frame.contains(NSEvent.mouseLocation)
     }
 
     /// Whether the island currently holds keyboard focus. It only becomes key
