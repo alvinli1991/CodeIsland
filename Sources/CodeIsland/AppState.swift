@@ -159,6 +159,11 @@ final class AppState {
     /// `beforeSubmitPrompt` arrives twice (#377). See ``CursorHookPayload``.
     @ObservationIgnored
     var cursorHookDeliveries = CursorHookDeliveryFilter()
+    /// Claude Code compacting finished sessions in the background: the
+    /// compaction's own hooks leave the card as it was. See
+    /// ``BackgroundCompactionFilter``.
+    @ObservationIgnored
+    var backgroundCompactions = BackgroundCompactionFilter()
 
     /// Per-agent AiWork/Agentix daemon watch clients (`sessions.watch`).
     /// Keyed by agent id (e.g. `"coder"`). See AppState+AiWorkWatch.
@@ -1559,6 +1564,13 @@ final class AppState {
         if (event.rawJSON["_source"] as? String) == "codex"
             && sessions[sessionId] == nil
             && event.rawJSON["transcript_path"] is NSNull {
+            return
+        }
+
+        // Claude Code compacting a finished session in the background: no
+        // card to open again, none to wake — not by its PreCompact, nor by
+        // the stop of the agent writing the summary or the restart from it.
+        if backgroundCompactions.absorbs(event, session: sessions[sessionId], now: Date()) {
             return
         }
 

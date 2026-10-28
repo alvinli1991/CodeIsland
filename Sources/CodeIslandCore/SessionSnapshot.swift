@@ -1200,6 +1200,26 @@ public func reduceEvent(
     return effects
 }
 
+/// Whether `event` is Claude Code compacting a finished session in the
+/// background. While a session sits idle, Claude Code compacts it ahead of
+/// the prompt cache expiring (about 54 minutes after the turn ended; its
+/// `idleCompaction` setting). It reports PreCompact — trigger "auto", the
+/// same as a compaction mid-turn — and no turn follows, so no Stop. Read
+/// as work, the PreCompact left a finished card on "thinking" for good, or
+/// brought one the idle sweep had removed back as "thinking". The
+/// compaction's other hooks are ``BackgroundCompactionFilter``'s, which
+/// AppState asks first. A manual /compact is the user's doing and still
+/// shows.
+public func isIdleBackgroundCompaction(_ event: HookEvent, session: SessionSnapshot?) -> Bool {
+    let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) ?? "claude"
+    guard source == "claude" else { return false }
+    let eventName = EventNormalizer.normalize(event.eventName)
+    guard eventName == "PreCompact" || eventName == "PostCompact",
+          event.agentId == nil,
+          (event.rawJSON["trigger"] as? String) != "manual" else { return false }
+    return session == nil || session?.status == .idle
+}
+
 private func applyHookEvent(
     sessions: inout [String: SessionSnapshot],
     event: HookEvent,
@@ -1211,6 +1231,10 @@ private func applyHookEvent(
     let sessionId = event.sessionId ?? "default"
     let eventName = EventNormalizer.normalize(event.eventName)
     var effects: [SideEffect] = []
+
+    if isIdleBackgroundCompaction(event, session: sessions[sessionId]) {
+        return effects
+    }
 
     // Ensure session exists
     if sessions[sessionId] == nil {
