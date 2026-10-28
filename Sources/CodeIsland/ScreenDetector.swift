@@ -72,6 +72,28 @@ struct ScreenDetector {
         )
     }
 
+    /// Whether a window (AppKit coordinates) covers all of a screen: a
+    /// fullscreen app on that display. Its size alone said so of a window as
+    /// large as the screen on any display — fullscreen on a monitor of the
+    /// same size or larger, or merely maximized on a larger one (#384). On a
+    /// notched display fullscreen apps sit below the notch and never do.
+    static func windowCoversScreen(_ window: CGRect, screenFrame: CGRect) -> Bool {
+        // A point of slack for windows placed at fractional coordinates.
+        window.insetBy(dx: -1, dy: -1).contains(screenFrame)
+    }
+
+    /// Whether one of these windows (CGWindowList bounds) is fullscreen on
+    /// the screen with this frame.
+    static func isFullscreen(
+        onScreenFrame screenFrame: CGRect,
+        windowListBounds: [CGRect],
+        primaryScreenMaxY: CGFloat
+    ) -> Bool {
+        windowListBounds.contains {
+            windowCoversScreen(appKitRect(fromWindowBounds: $0, primaryScreenMaxY: primaryScreenMaxY), screenFrame: screenFrame)
+        }
+    }
+
     /// Preferred screen: active work screen first, then built-in (notch), then main
     static var preferredScreen: NSScreen {
         let screens = NSScreen.screens

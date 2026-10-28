@@ -664,30 +664,30 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         return appState.sessions.values.allSatisfy { $0.status == .idle }
     }
 
+    /// Whether the frontmost app is fullscreen on the island's display. One
+    /// fullscreen on another display — with "Displays have separate Spaces"
+    /// each display shows a Space of its own — leaves the island alone.
     private func isActiveSpaceFullscreen() -> Bool {
         guard let frontApp = NSWorkspace.shared.frontmostApplication,
-              frontApp.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
-
-        let screen = chosenScreen()
+              frontApp.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              let primaryMaxY = NSScreen.screens.first?.frame.maxY else { return false }
 
         // Primary: check if frontmost app has a window covering the entire screen
-        if let windowList = CGWindowListCopyWindowInfo(
+        guard let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-        ) as? [[String: Any]] {
-            for window in windowList {
-                guard let pid = window[kCGWindowOwnerPID as String] as? pid_t,
-                      pid == frontApp.processIdentifier,
-                      let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
-                      let bounds = window[kCGWindowBounds as String] as? [String: Any],
-                      let w = bounds["Width"] as? CGFloat,
-                      let h = bounds["Height"] as? CGFloat else { continue }
-                if w >= screen.frame.width && h >= screen.frame.height {
-                    return true
-                }
-            }
+        ) as? [[String: Any]] else { return false }
+        let appWindows = windowList.compactMap { window -> CGRect? in
+            guard let pid = window[kCGWindowOwnerPID as String] as? pid_t,
+                  pid == frontApp.processIdentifier,
+                  let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any] else { return nil }
+            return CGRect(dictionaryRepresentation: bounds as CFDictionary)
         }
-
-        return false
+        return ScreenDetector.isFullscreen(
+            onScreenFrame: chosenScreen().frame,
+            windowListBounds: appWindows,
+            primaryScreenMaxY: primaryMaxY
+        )
     }
 
     /// Whether the island currently holds keyboard focus. It only becomes key

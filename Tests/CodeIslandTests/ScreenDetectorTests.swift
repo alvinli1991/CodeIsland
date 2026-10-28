@@ -145,4 +145,69 @@ final class ScreenDetectorTests: XCTestCase {
             1
         )
     }
+
+    // MARK: - Fullscreen on the island's display (#384)
+
+    /// A fullscreen app on the monitor beside the MacBook: larger than the
+    /// MacBook's screen, which is all the size check asked.
+    func testAFullscreenWindowOnAnotherDisplayIsNotFullscreenOnTheIslands() {
+        let builtIn = NSRect(x: 0, y: 0, width: 1512, height: 982)
+        let monitor = NSRect(x: 1512, y: -458, width: 2560, height: 1440)
+        let fullscreenOnMonitor = CGRect(x: 1512, y: 0, width: 2560, height: 1440)
+        XCTAssertTrue(ScreenDetector.isFullscreen(
+            onScreenFrame: monitor, windowListBounds: [fullscreenOnMonitor], primaryScreenMaxY: 982
+        ))
+        XCTAssertFalse(ScreenDetector.isFullscreen(
+            onScreenFrame: builtIn, windowListBounds: [fullscreenOnMonitor], primaryScreenMaxY: 982
+        ))
+        // With another window of the app on the MacBook, as a second
+        // terminal window is.
+        XCTAssertFalse(ScreenDetector.isFullscreen(
+            onScreenFrame: builtIn,
+            windowListBounds: [CGRect(x: 100, y: 100, width: 1200, height: 700), fullscreenOnMonitor],
+            primaryScreenMaxY: 982
+        ))
+    }
+
+    func testAFullscreenWindowOnAnIdenticalMonitorBesideIsNotFullscreenOnTheIslands() {
+        let left = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let right = NSRect(x: 1920, y: 0, width: 1920, height: 1080)
+        let fullscreenOnRight = CGRect(x: 1920, y: 0, width: 1920, height: 1080)
+        XCTAssertTrue(ScreenDetector.isFullscreen(
+            onScreenFrame: right, windowListBounds: [fullscreenOnRight], primaryScreenMaxY: 1080
+        ))
+        XCTAssertFalse(ScreenDetector.isFullscreen(
+            onScreenFrame: left, windowListBounds: [fullscreenOnRight], primaryScreenMaxY: 1080
+        ))
+    }
+
+    func testAFullscreenWindowOnAMonitorAboveIsFullscreenThere() {
+        let fullscreenAbove = CGRect(x: -524, y: -1440, width: 2560, height: 1440)
+        XCTAssertTrue(ScreenDetector.isFullscreen(
+            onScreenFrame: monitorAbove.frame, windowListBounds: [fullscreenAbove], primaryScreenMaxY: 982
+        ))
+        XCTAssertFalse(ScreenDetector.isFullscreen(
+            onScreenFrame: builtInPrimary.frame, windowListBounds: [fullscreenAbove], primaryScreenMaxY: 982
+        ))
+    }
+
+    func testAMaximizedWindowIsNotFullscreen() {
+        let monitor = NSRect(x: 1512, y: -458, width: 2560, height: 1440)
+        let belowMenuBar = NSRect(x: 1512, y: -458, width: 2560, height: 1415)
+        XCTAssertFalse(ScreenDetector.windowCoversScreen(belowMenuBar, screenFrame: monitor))
+        XCTAssertFalse(ScreenDetector.windowCoversScreen(belowMenuBar, screenFrame: NSRect(x: 0, y: 0, width: 1512, height: 982)))
+    }
+
+    /// Fullscreen apps on a notched MacBook sit below the notch, as before.
+    func testAFullscreenAppBelowTheNotchDoesNotCoverTheNotchedScreen() {
+        let builtIn = NSRect(x: 0, y: 0, width: 1512, height: 982)
+        XCTAssertFalse(ScreenDetector.windowCoversScreen(NSRect(x: 0, y: 0, width: 1512, height: 950), screenFrame: builtIn))
+    }
+
+    func testAFullscreenWindowAtFractionalCoordinatesCovers() {
+        let monitor = NSRect(x: 1512, y: -458, width: 2560, height: 1440)
+        XCTAssertTrue(ScreenDetector.windowCoversScreen(
+            NSRect(x: 1511.5, y: -458.5, width: 2560, height: 1440), screenFrame: monitor
+        ))
+    }
 }
