@@ -442,7 +442,11 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             return
         }
 
-        if signature != lastChosenScreenSignature {
+        // Not out from under the user: a move rebuilds the island, and one
+        // while they point at it or type into it took their half-typed answer
+        // and their place with it. It follows at the next check once they've
+        // left it (the poll, the next app switch or Space change).
+        if signature != lastChosenScreenSignature, !isUserOnIsland {
             animateScreenHop(to: screen, signature: signature)
         }
     }

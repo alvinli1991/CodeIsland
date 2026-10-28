@@ -64,10 +64,32 @@ final class AppState {
                     dismissedQuestionIds.formIntersection(queued)
                 }
             }
+            // So does what the user had typed into its card.
+            if !questionDrafts.isEmpty {
+                let queued = Set(questionQueue.map(\.id))
+                questionDrafts = questionDrafts.filter { queued.contains($0.key) }
+            }
             followUps.waitingChanged()
             PushNotifier.shared.requestsChanged()
         }
     }
+    /// What the user has typed and picked on a question card, by request. The
+    /// card's view is rebuilt whenever the island moves to another display or
+    /// the displays change, and its own state went with it: half an answer
+    /// typed, a multi-question wizard's earlier answers. Kept while the
+    /// request is queued, closed cards included.
+    @ObservationIgnored
+    private var questionDrafts: [UUID: QuestionWizardState] = [:]
+
+    func questionDraft(for requestId: UUID) -> QuestionWizardState? {
+        questionDrafts[requestId]
+    }
+
+    func saveQuestionDraft(_ draft: QuestionWizardState) {
+        guard let id = draft.requestId, questionQueue.contains(where: { $0.id == id }) else { return }
+        questionDrafts[id] = draft
+    }
+
     /// Follow-up reminders for waiting approvals / questions and unseen
     /// completions. Holds no entries and arms no timer while the setting is off.
     @ObservationIgnored

@@ -40,7 +40,7 @@ struct AskUserQuestionItem {
     let multiSelect: Bool
 }
 
-struct AskUserQuestionAnswer {
+struct AskUserQuestionAnswer: Equatable {
     let question: String
     let answer: String
     let selectedOptions: [String]

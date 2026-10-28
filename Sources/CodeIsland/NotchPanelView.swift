@@ -2293,7 +2293,7 @@ func makeQuestionBarFreeTextAnswer(
 /// answers collected for A then led B's submission, and since answers are
 /// mapped onto questions by position, B's question was sent A's answer.
 /// Recording against a different request therefore starts over. (#333)
-struct QuestionWizardState {
+struct QuestionWizardState: Equatable {
     private(set) var requestId: UUID?
     private(set) var currentQuestionIndex = 0
     private(set) var collectedAnswers: [AskUserQuestionAnswer] = []
@@ -2466,7 +2466,17 @@ private struct QuestionBar: View {
         .onChange(of: requestId, initial: true) { _, newId in
             // The caller keys this view by request, so a new request normally
             // gets a fresh view; this keeps the wizard honest if it does not.
-            wizard.bind(to: newId)
+            // A view rebuilt under the same request — the island moving to
+            // another display, the displays changing — takes up what the user
+            // had typed and picked there.
+            if let newId, let draft = appState.questionDraft(for: newId) {
+                wizard = draft
+            } else {
+                wizard.bind(to: newId)
+            }
+        }
+        .onChange(of: wizard) { _, draft in
+            appState.saveQuestionDraft(draft)
         }
         .onDisappear {
             jumpValidationTask?.cancel()
