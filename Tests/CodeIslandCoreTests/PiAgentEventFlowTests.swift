@@ -108,7 +108,7 @@ final class PiAgentEventFlowTests: XCTestCase {
         XCTAssertTrue(stopEffects.contains(.enqueueCompletion(sessionId: sessionId)))
     }
 
-    /// The pi extension sends a turn the user aborted (Esc) as
+    /// The pi and Oh My Pi extensions send a turn the user aborted (Esc) as
     /// `stop_reason: "interrupted"` (#386): it ends the turn as interrupted,
     /// which AttentionPolicy ends without the completion chime.
     func testPiStopTheUserAbortedEndsTheTurnInterrupted() throws {
