@@ -842,6 +842,87 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         }
     }
 
+    // MARK: - Agents that read one decision and ask again (#380)
+
+    /// A permission request of `source`'s, through the island's own reading
+    /// of hooks.
+    private func agentRequest(
+        _ source: String?,
+        session: String,
+        tool: String,
+        input: [String: Any] = ["command": "make test"],
+        remoteHost: String? = nil
+    ) throws -> HookEvent {
+        var payload: [String: Any] = [
+            "hook_event_name": "PermissionRequest", "session_id": session, "tool_name": tool, "tool_input": input,
+        ]
+        payload["_source"] = source
+        payload["_remote_host_id"] = remoteHost
+        return try event(payload)
+    }
+
+    /// Which agents keep "Always" themselves, and which the island keeps it
+    /// for (AppState.agentKeepsAlwaysRule).
+    private enum AgentAlwaysCases {
+        static let islandKept = [
+            "gemini", "qwen", "qoder", "qoderwork", "traecli", "zcode", "opencode", "mimo", "pi", "omp", "openclaw", "dsh",
+        ]
+        static let agentKept: [String?] = [nil, "claude", "qoder-cli", "minimax"]
+    }
+
+    /// Gemini reads `{"decision":"allow"}`, Qwen Code and the Qoder IDE read
+    /// the decision and drop the rules, pi, Oh My Pi, OpenClaw and DeepSeek
+    /// Harness's plugin read `behavior`: none of them keeps a rule from the
+    /// island's answer, so "Always allow Bash this session" allowed one call
+    /// and the next one asked again. OpenCode and ZCode kept one, but not the
+    /// card's (OpenCode its own patterns, for the whole folder or saved to
+    /// the project; ZCode the tool, saved to the project). The island keeps
+    /// "Always" for the session — that tool, that session, nothing more —
+    /// and the agent is told "allow", so it keeps nothing broader.
+    func testAnAgentThatAsksAgainHasItsAlwaysHeldForTheSession() async throws {
+        for source in AgentAlwaysCases.islandKept {
+            let appState = AppState()
+            let session = "s-\(source)"
+            let first = try agentRequest(source, session: session, tool: "Bash")
+            XCTAssertEqual(ApprovalAlwaysScope(for: first), .session, source)
+            let firstTask = await startHookRequest { appState.handlePermissionRequest(first, continuation: $0) }
+            appState.approvePermission(always: true, expectedSessionId: session)
+            let firstAnswer = try await awaitValue(of: firstTask)
+            XCTAssertEqual(firstAnswer, AppState.plainAllowAnswer, "\(source): the decision alone")
+
+            try await expectAnsweredByAlways(appState, try agentRequest(source, session: session, tool: "Bash", input: ["command": "rm -rf build"]),
+                                             "\(source): the tool, for the rest of the session")
+            try await expectCard(appState, try agentRequest(source, session: session, tool: "Edit", input: ["file_path": "/a.swift"]),
+                                 "\(source): another tool")
+            try await expectCard(appState, try agentRequest(source, session: "\(session)-2", tool: "Bash"), "\(source): another session")
+            try await expectCard(
+                appState,
+                try agentRequest(source, session: session, tool: "Bash", remoteHost: "devbox"),
+                "\(source): a remote host's session of the same id"
+            )
+        }
+    }
+
+    /// Claude Code keeps the session rule the answer carries; a request of
+    /// the tool that still reaches the island is one Claude Code chose to
+    /// ask (a protected path, auto mode), and the user answers it.
+    func testClaudeCodeKeepsItsOwnAlwaysAndTheIslandAddsNone() async throws {
+        for source in AgentAlwaysCases.agentKept {
+            let appState = AppState()
+            let session = "s-\(source ?? "claude")"
+            let first = try agentRequest(source, session: session, tool: "Bash")
+            let firstTask = await startHookRequest { appState.handlePermissionRequest(first, continuation: $0) }
+            appState.approvePermission(always: true, expectedSessionId: session)
+            let answer = try await awaitValue(of: firstTask)
+            let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: answer) as? [String: Any])
+            let decision = try XCTUnwrap((json["hookSpecificOutput"] as? [String: Any])?["decision"] as? [String: Any])
+            XCTAssertEqual(decision["behavior"] as? String, "allow")
+            XCTAssertNotNil(decision["updatedPermissions"] ?? decision["permissionUpdates"], "\(String(describing: source)) keeps the rule")
+
+            try await expectCard(appState, try agentRequest(source, session: session, tool: "Bash"), "\(String(describing: source)) asked itself")
+        }
+    }
+
     // MARK: - What the opt-in hint says the host's other users can do
 
     /// With "Agents Run as Other Users" on, the host's other users can send

@@ -2635,8 +2635,9 @@ struct ConfigInstaller {
     // exactly {behavior, permissionUpdates?/updatedInput?} or
     // {behavior: "deny", interrupt?, message?} — Claude's
     // `updatedPermissions`/`destination` keys fail validation and the whole
-    // decision is discarded (ZCode then shows its own dialog). See
-    // AppState.zcodeAlwaysAllowResponse for the always-allow shape. No
+    // decision is discarded (ZCode then shows its own dialog). "Always" sends
+    // a plain allow: `permissionUpdates` would be saved to the project for
+    // good, not the session the card names (AppState.agentKeepsAlwaysRule). No
     // hot-reload; a ZCode restart is required after any config.json edit.
 
     /// The only 7 event names ZCode's schema accepts. Writing anything else

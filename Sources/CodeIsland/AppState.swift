@@ -2218,52 +2218,9 @@ final class AppState {
         let pending = permissionQueue.remove(at: index)
         let sessionId = pending.event.sessionId ?? "default"
         dismissedPermissionSessionIds.remove(sessionId)
-        let responseData: Data
-        if always, CodexPermissionRules.isCodexEvent(pending.event) {
-            // A running Codex never takes in what "Always" saves: it reads
-            // ~/.codex/rules and config.toml when a session starts
-            // (codex-rs/core/src/session/mod.rs, `ExecPolicyManager::load`;
-            // only its own approvals reach the session's policy), and its
-            // PermissionRequest output holds nothing beyond this call. The
-            // rule stops the sessions Codex starts from now on; this one's
-            // next requests come here, and the island answers them as the
-            // card said. A remote Codex reads its rules on its own host and
-            // none may be written to this Mac's, and a request no rule can
-            // describe has none to save: "Always" holds for the session.
-            rememberCodexAlways(pending, sessionId: sessionId)
-            responseData = Self.plainAllowAnswer
-        } else if always, Self.isZcodeEvent(pending.event) {
-            responseData = Self.zcodeAlwaysAllowResponse(toolName: pending.event.toolName)
-        } else if always {
-            let toolName = pending.event.toolName ?? ""
-            // MCP tools (`mcp__server__tool`) don't accept a rule specifier — the
-            // rule must be the bare tool name. Sending `ruleContent: "*"` makes
-            // Claude Code assemble `mcp__server__tool(*)`, which never matches an
-            // actual MCP call, so the "always allow" rule silently fails to
-            // persist and the same approval keeps re-prompting. Non-MCP tools
-            // (Bash/Read/Edit/…) keep the `*` specifier. (#224)
-            var rule: [String: Any] = ["toolName": toolName]
-            if !toolName.hasPrefix("mcp__") {
-                rule["ruleContent"] = "*"
-            }
-            let obj: [String: Any] = [
-                "hookSpecificOutput": [
-                    "hookEventName": "PermissionRequest",
-                    "decision": [
-                        "behavior": "allow",
-                        "updatedPermissions": [[
-                            "type": "addRules",
-                            "rules": [rule],
-                            "behavior": "allow",
-                            "destination": "session"
-                        ]]
-                    ] as [String: Any]
-                ] as [String: Any]
-            ]
-            responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
-        } else {
-            responseData = Self.plainAllowAnswer
-        }
+        let responseData = always
+            ? alwaysAllowAnswer(for: pending, sessionId: sessionId)
+            : Self.plainAllowAnswer
         pending.continuation.resume(returning: responseData)
         resolveMergedSubagentAfterUI(
             sessionId: sessionId,
@@ -2303,6 +2260,43 @@ final class AppState {
         }
     }
 
+    /// Allows `pending`, and makes its "Always" hold for what its card said:
+    /// in the rule the agent keeps, or — where the agent keeps none that
+    /// stops its next request asking — in the session, which the island
+    /// answers (sessionAlwaysAllows).
+    private func alwaysAllowAnswer(for pending: PermissionRequest, sessionId: String) -> Data {
+        let event = pending.event
+        if CodexPermissionRules.isCodexEvent(event) {
+            // A running Codex never takes in what "Always" saves: it reads
+            // ~/.codex/rules and config.toml when a session starts
+            // (codex-rs/core/src/session/mod.rs, `ExecPolicyManager::load`;
+            // only its own approvals reach the session's policy), and its
+            // PermissionRequest output holds nothing beyond this call. The
+            // rule stops the sessions Codex starts from now on; this one's
+            // next requests come here, and the island answers them as the
+            // card said. A remote Codex reads its rules on its own host and
+            // none may be written to this Mac's, and a request no rule can
+            // describe has none to save: "Always" holds for the session.
+            rememberCodexAlways(pending, sessionId: sessionId)
+            return Self.plainAllowAnswer
+        }
+        if Self.agentKeepsAlwaysRule(for: event) {
+            return Self.claudeAlwaysAllowResponse(
+                toolName: event.toolName ?? "",
+                bareToolName: SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) == "minimax"
+            )
+        }
+        if let toolName = event.toolName, !toolName.isEmpty {
+            sessions[sessionId]?.alwaysAllowedTools.insert(toolName)
+        }
+        // This call only. What these agents would make of a rule is not what
+        // the card said: nothing at all; only the patterns OpenCode picked,
+        // shared by every session in the folder (1.x) or saved to the project
+        // for good (2.x); a rule ZCode saves to the project for good. A
+        // Codex-family agent (Trae CLI Next) refuses an answer carrying one.
+        return Self.plainAllowAnswer
+    }
+
     /// Codex's "Always", as its card's link put it (``PermissionRequest/alwaysScope``):
     /// the rule saved for the sessions Codex starts from now on, and held by
     /// the island for this one.
@@ -2334,44 +2328,72 @@ final class AppState {
             && CodexPermissionRules.commandsStart(event, withAnyOf: session.alwaysAllowedCommandPrefixes)
     }
 
-    nonisolated static func isZcodeEvent(_ event: HookEvent) -> Bool {
-        SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) == "zcode"
-    }
-
-    nonisolated static func isQoderEvent(_ event: HookEvent) -> Bool {
-        guard let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) else { return false }
-        return source == "qoder" || source == "qoder-cli"
-    }
-
-    /// "Always allow" response for a ZCode PermissionRequest hook (#258).
+    /// Whether the agent keeps the rule "Always allow" sends with its answer
+    /// for the rest of the session — the tool, every call of it — so that
+    /// its later requests for the tool never come here. What it asks after
+    /// that is its own call (a protected path, a safety check), for the user
+    /// to answer.
+    /// - Claude Code adds `updatedPermissions` to the session's rules, where
+    ///   `Bash(*)` reads as the bare tool, and a subagent's go into the same
+    ///   rules (2.1.312: a subagent's context is handed the session's
+    ///   `setSessionToolPermissionContext`).
+    /// - Qoder CLI and Qoder CN (`qoder-cli`, 1.1.80) apply them the same
+    ///   way, kept in memory for the session.
+    /// - MiniMax Code (0.7.1, CodeIsland's pack is a Claude-format plugin)
+    ///   keeps a `session` rule in its plugin permission store; its file
+    ///   tools match a `ruleContent` as a path, so it gets the bare tool name.
     ///
-    /// ZCode validates hook stdout with a STRICT schema (unknown keys void the
-    /// whole decision, and ZCode falls back to its own dialog). Persistent
-    /// rules therefore go in `permissionUpdates` — NOT Claude's
-    /// `updatedPermissions` — and there is no `destination` key. A rule with a
-    /// bare `toolName` (no `ruleContent`) matches every future call of that
-    /// tool, which is exactly the "always allow this tool" semantic; a
-    /// `ruleContent` of "*" would instead be compared against the call's
-    /// command/path subject and never match. Events without a tool name can't
-    /// form a valid rule (toolName must be non-empty), so they degrade to a
-    /// plain one-time allow.
-    nonisolated static func zcodeAlwaysAllowResponse(toolName: String?) -> Data {
-        let plainAllow = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8)
-        guard let toolName, !toolName.isEmpty else { return plainAllow }
+    /// The rest read one decision from the answer and ask again for the next
+    /// call: Gemini CLI (an allow cannot even skip its own confirmation),
+    /// Qwen Code (its PermissionRequest result has no field for the rules),
+    /// the Qoder IDE and app, Trae CLI, pi, Oh My Pi, OpenClaw, DeepSeek
+    /// Harness's plugin, ZCode (which saves the rule to the project, for
+    /// good) and OpenCode (which keeps patterns of its own choosing, for
+    /// every session in the folder or the project). The island keeps
+    /// "Always" for those (sessionAlwaysAllows). Codex is handled on its own
+    /// (rememberCodexAlways).
+    nonisolated static func agentKeepsAlwaysRule(for event: HookEvent) -> Bool {
+        // A hook that names no source is Claude Code's.
+        guard let raw = event.rawJSON["_source"] as? String,
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
+        switch SessionSnapshot.normalizedSupportedSource(raw) {
+        case "claude", "qoder-cli", "minimax": return true
+        default: return false
+        }
+    }
+
+    /// "Always allow" as Claude Code reads it: a session rule for the tool.
+    nonisolated static func claudeAlwaysAllowResponse(toolName: String, bareToolName: Bool = false) -> Data {
+        // MCP tools (`mcp__server__tool`) don't accept a rule specifier — the
+        // rule must be the bare tool name. Sending `ruleContent: "*"` makes
+        // Claude Code assemble `mcp__server__tool(*)`, which never matches an
+        // actual MCP call, so the "always allow" rule silently fails to
+        // persist and the same approval keeps re-prompting. Non-MCP tools
+        // (Bash/Read/Edit/…) keep the `*` specifier. (#224)
+        var rule: [String: Any] = ["toolName": toolName]
+        if !bareToolName, !toolName.hasPrefix("mcp__") {
+            rule["ruleContent"] = "*"
+        }
         let obj: [String: Any] = [
             "hookSpecificOutput": [
                 "hookEventName": "PermissionRequest",
                 "decision": [
                     "behavior": "allow",
-                    "permissionUpdates": [[
+                    "updatedPermissions": [[
                         "type": "addRules",
+                        "rules": [rule],
                         "behavior": "allow",
-                        "rules": [["toolName": toolName]],
-                    ] as [String: Any]]
+                        "destination": "session"
+                    ]]
                 ] as [String: Any]
             ] as [String: Any]
         ]
-        return (try? JSONSerialization.data(withJSONObject: obj)) ?? plainAllow
+        return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
+    }
+
+    nonisolated static func isQoderEvent(_ event: HookEvent) -> Bool {
+        guard let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) else { return false }
+        return source == "qoder" || source == "qoder-cli"
     }
 
     /// `expectedSessionId` is the session the remote surface was showing when

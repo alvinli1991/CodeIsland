@@ -368,11 +368,12 @@ final class AppStatePermissionFlowTests: XCTestCase {
         XCTAssertEqual(rule["ruleContent"] as? String, "*")
     }
 
-    /// #258: ZCode validates hook stdout with a STRICT schema — "always allow"
-    /// must ship the rule in `permissionUpdates` (bare toolName, no
-    /// `destination`), never Claude's `updatedPermissions` shape, or the whole
-    /// decision is silently voided and ZCode re-prompts in its own dialog.
-    func testZcodeAlwaysAllowEmitsPermissionUpdatesNotUpdatedPermissions() async throws {
+    /// #258: ZCode validates hook stdout with a STRICT schema — Claude's
+    /// `updatedPermissions` would void the whole decision and ZCode would
+    /// re-prompt in its own dialog. #380: its own `permissionUpdates` is saved
+    /// to the project for good, more than the card's "this session", so
+    /// "Always" sends the decision alone and the island holds the rest.
+    func testZcodeAlwaysAllowSendsOnlyTheDecision() async throws {
         let appState = AppState()
         let event = try makePermissionRequestEvent(
             sessionId: "s-zcode-always",
@@ -387,15 +388,32 @@ final class AppStatePermissionFlowTests: XCTestCase {
         let decision = try extractPermissionDecision(from: await awaitValue(of: responseTask))
         XCTAssertEqual(decision["behavior"] as? String, "allow")
         XCTAssertNil(decision["updatedPermissions"])
+        XCTAssertNil(decision["permissionUpdates"])
+        XCTAssertEqual(appState.sessions["s-zcode-always"]?.alwaysAllowedTools, ["Bash"])
+    }
 
-        let updates = try XCTUnwrap(decision["permissionUpdates"] as? [[String: Any]])
-        let update = try XCTUnwrap(updates.first)
-        XCTAssertEqual(update["type"] as? String, "addRules")
-        XCTAssertEqual(update["behavior"] as? String, "allow")
-        XCTAssertNil(update["destination"])
-        let rules = try XCTUnwrap(update["rules"] as? [[String: Any]])
-        XCTAssertEqual(rules.first?["toolName"] as? String, "Bash")
-        XCTAssertNil(rules.first?["ruleContent"])
+    /// MiniMax Code reads a Claude-format plugin's `updatedPermissions` into
+    /// its session rules, but matches a file tool's `ruleContent` as a path:
+    /// `Read(*)` never matched, and the next read asked again. It gets the
+    /// bare tool name, which covers every call.
+    func testMiniMaxAlwaysAllowSendsABareToolRule() async throws {
+        for tool in ["Read", "Bash", "mcp__docs__search"] {
+            let appState = AppState()
+            let event = try makePermissionRequestEvent(
+                sessionId: "s-minimax-always",
+                toolName: tool,
+                toolInput: ["file_path": "/tmp/a.txt"],
+                source: "minimax"
+            )
+
+            let responseTask = await startHookRequest { appState.handlePermissionRequest(event, continuation: $0) }
+            appState.approvePermission(always: true)
+
+            let rule = try firstAlwaysAllowRule(from: await awaitValue(of: responseTask))
+            XCTAssertEqual(rule["toolName"] as? String, tool)
+            XCTAssertNil(rule["ruleContent"], tool)
+            XCTAssertTrue(appState.sessions["s-minimax-always"]?.alwaysAllowedTools.isEmpty ?? true, "MiniMax keeps it itself")
+        }
     }
 
     /// Plain (one-time) allow and deny for ZCode use the shared minimal shape,
