@@ -2965,38 +2965,7 @@ private struct SessionListView: View {
             }
 
         case "cli":
-            let cliOrder: [(source: String, name: String)] = [
-                ("claude", "Claude"),
-                ("codex", "Codex"),
-                ("gemini", "Gemini"),
-                ("antigravity", "AntiGravity"),
-                ("google-antigravity", "Google Antigravity"),
-                ("cursor", "Cursor"),
-                ("trae", "Trae"),
-                ("traecn", "Trae CN"),
-                ("traecli", "Trae CLI"),
-                ("copilot", "Copilot"),
-                ("qoder", "Qoder"),
-                ("qoderwork", "QoderWork"),
-                ("droid", "Factory"),
-                ("codebuddy", "CodeBuddy"),
-                ("codybuddycn", "CodyBuddyCN"),
-                ("stepfun", "StepFun"),
-                ("workbuddy", "WorkBuddy"),
-                ("hermes", "Hermes"),
-                ("openclaw", "OpenClaw"),
-                ("qwen", "Qwen Code"),
-                ("kimi", "Kimi Code CLI"),
-                ("opencode", "OpenCode"),
-                ("mimo", "MiMo"),
-                ("pi", "Pi"),
-                ("kiro", "Kiro"),
-                ("cline", "Cline"),
-                ("zcode", "ZCode"),
-                ("minimax", "MiniMax Code CLI"),
-                ("aiwork", "AiWork"),
-                ("aiwork-cli", "AiWork CLI"),
-            ]
+            let cliOrder = SessionListGrouping.cliSections
             var result: [(String, String?, [String])] = []
             var seen = Set<String>()
             for cli in cliOrder {
