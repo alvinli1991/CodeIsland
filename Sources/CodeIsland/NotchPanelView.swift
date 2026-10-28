@@ -329,7 +329,7 @@ struct NotchPanelView: View {
                                 session: session,
                                 sessionId: sid,
                                 appState: appState,
-                                alwaysScope: ApprovalAlwaysScope(for: pending.event),
+                                alwaysScope: pending.alwaysScope,
                                 onAllow: { appState.approvePermission(always: false, expectedSessionId: sid) },
                                 onAlwaysAllow: { appState.approvePermission(always: true, expectedSessionId: sid) },
                                 onDeny: { appState.denyPermission(expectedSessionId: sid) },
@@ -1536,33 +1536,39 @@ private struct ApprovalToolDetailView: View {
 enum ApprovalHints {
     /// What "Always" commits to differs by agent: Claude-style hooks add a
     /// rule for the rest of the session, Codex gets a rule saved to disk
-    /// (CodexPermissionRules) that outlives it — for the commands that start
-    /// with the words it names or, for an MCP tool, an approval in
-    /// config.toml — except where Codex saves none (a remote Codex, a request
-    /// no rule can describe), whose "Always" lasts the session
+    /// (CodexPermissionRules) for the sessions it starts from now on — for
+    /// the commands that start with the words it names or, for an MCP tool,
+    /// an approval in config.toml — and the island holds it for this one,
+    /// which never reads it. Where Codex saves none (a remote Codex, a
+    /// request no rule can describe), "Always" lasts the session
     /// (CodexPermissionRules.alwaysSavesRule).
     static func always(scope: ApprovalAlwaysScope) -> String {
         switch scope {
         case .session: return L10n.shared["always_hint_session"]
-        case .codexRules(let pattern):
-            return String(format: L10n.shared["always_hint_saved"], ApprovalCopy.commandWords(pattern))
+        case .codexRules(let patterns):
+            return String(format: L10n.shared["always_hint_saved"], ApprovalCopy.commandWords(anyOf: patterns))
         case .codexMCPConfig: return L10n.shared["always_hint_saved_mcp"]
         }
     }
 }
 
 /// Where "Always allow" puts its rule — what the approval card's link says.
+/// Worked out once, when the request is queued (``PermissionRequest``): the
+/// card's words and what the click does come from the same value.
 enum ApprovalAlwaysScope: Equatable {
-    /// Claude-style hooks: a rule for this tool, for the rest of the session.
-    /// A remote Codex gets the same, kept by the island (its rules are on
-    /// its own host), and so does a local Codex request no rule can describe.
+    /// This tool, for the rest of the session. Claude Code keeps the rule
+    /// itself; for an agent that keeps none, the island does
+    /// (AppState.approvePermission) — a remote Codex (its rules are on its
+    /// own host), a local Codex request no rule can describe.
     case session
-    /// Codex: a prefix rule in ~/.codex/rules, kept for every session, for
-    /// the commands that start with `pattern` — the words the link names are
-    /// the words saved (CodexPermissionRules.prefixPattern).
-    case codexRules(pattern: [String])
+    /// Codex: prefix rules in ~/.codex/rules for the commands that start
+    /// with one of `patterns` — the words the link names are the words saved
+    /// (CodexPermissionRules.prefixPatterns). Codex reads them in the
+    /// sessions it starts from now on; the island holds them for this one.
+    case codexRules(patterns: [[String]])
     /// Codex MCP tool: an approval in ~/.codex/config.toml
-    /// (CodexPermissionRules.persistAlwaysAllowRule).
+    /// (CodexPermissionRules.persistAlwaysAllowRule), for the sessions Codex
+    /// starts from now on; the island holds it for this one.
     case codexMCPConfig
 
     /// Where "Always" puts the rule for `event`.
@@ -1573,8 +1579,8 @@ enum ApprovalAlwaysScope: Equatable {
         }
         if CodexPermissionRules.mcpToolApprovalTarget(for: event) != nil {
             self = .codexMCPConfig
-        } else if let pattern = CodexPermissionRules.prefixPattern(for: event) {
-            self = .codexRules(pattern: pattern)
+        } else if let patterns = CodexPermissionRules.prefixPatterns(for: event) {
+            self = .codexRules(patterns: patterns)
         } else {
             self = .session
         }
@@ -1689,10 +1695,10 @@ enum ApprovalCopy {
     }
 
     /// "Always allow Bash this session", or where Codex saves the rule — and
-    /// for a command's rule, the words it covers.
+    /// for a command's rules, the words they cover.
     static func alwaysLink(tool: String, scope: ApprovalAlwaysScope) -> String {
-        if case .codexRules(let pattern) = scope, let path = scope.savedPath {
-            return String(format: L10n.shared["card_always_saved_prefix"], commandWords(pattern), path)
+        if case .codexRules(let patterns) = scope, let path = scope.savedPath {
+            return String(format: L10n.shared["card_always_saved_prefix"], commandWords(anyOf: patterns), path)
         }
         if let path = scope.savedPath {
             return String(format: L10n.shared["card_always_saved"], path)
@@ -1700,11 +1706,14 @@ enum ApprovalCopy {
         return String(format: L10n.shared["card_always_session"], displayName(tool))
     }
 
-    /// The session list's "Always" button: the tool, or the words a Codex
-    /// rule covers.
+    /// The session list's "Always" button: the tool, or the words Codex
+    /// rules cover.
     static func inlineAlwaysTitle(tool: String, scope: ApprovalAlwaysScope) -> String {
-        if case .codexRules(let pattern) = scope {
-            return String(format: L10n.shared["session_inline_always_prefix"], commandWords(pattern))
+        if case .codexRules(let patterns) = scope {
+            // "git add -A … or git commit -m …": the format ends the last one.
+            let words = patterns.map(commandWords)
+                .joined(separator: " …" + L10n.shared["always_patterns_joiner"])
+            return String(format: L10n.shared["session_inline_always_prefix"], words)
         }
         return String(format: L10n.shared["session_inline_always"], ToolNameDisplay.compact(tool))
     }
@@ -1714,6 +1723,12 @@ enum ApprovalCopy {
     /// visible — so the words shown are the words saved.
     static func commandWords(_ pattern: [String]) -> String {
         pattern.map(shellWord).joined(separator: " ")
+    }
+
+    /// Several rules' patterns, as the card names them: "git add -A or git
+    /// commit -m".
+    static func commandWords(anyOf patterns: [[String]]) -> String {
+        patterns.map(commandWords).joined(separator: L10n.shared["always_patterns_joiner"])
     }
 
     private static let plainShellWordCharacters = CharacterSet(
@@ -4410,11 +4425,12 @@ private struct SessionCard: View {
     private func approvalBlock(queueIndex idx: Int) -> some View {
         // Approval details require the provider's raw tool name; the
         // session itself may hold a friendly Codex activity label.
-        let event = appState.permissionQueue[idx].event
+        let request = appState.permissionQueue[idx]
+        let event = request.event
         let tool = event.toolName ?? session.currentTool ?? "Unknown"
         let input = event.toolInput
         approvalRequestLine(tool: tool, input: input, position: idx + 1, total: appState.permissionQueue.count)
-        inlineApprovalActions(tool: tool, event: event)
+        inlineApprovalActions(tool: tool, alwaysScope: request.alwaysScope)
 
         // Expanded detail view
         if showApprovalDetails {
@@ -4475,10 +4491,9 @@ private struct SessionCard: View {
     /// Always (a link that names its scope) … Details · Deny · Allow once.
     /// Allow once is the only filled button. Only the head of the queue can
     /// be answered from here; the others say why their buttons are dim.
-    private func inlineApprovalActions(tool: String, event: HookEvent) -> some View {
+    private func inlineApprovalActions(tool: String, alwaysScope: ApprovalAlwaysScope) -> some View {
         let enabled = isActiveApproval
         let queuedHint = enabled ? nil : L10n.shared["session_inline_queued_hint"]
-        let alwaysScope = ApprovalAlwaysScope(for: event)
         return HStack(spacing: 8) {
             SessionInlineButton(
                 title: ApprovalCopy.inlineAlwaysTitle(tool: tool, scope: alwaysScope),

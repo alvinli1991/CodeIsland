@@ -504,7 +504,7 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         for payload in payloads {
             try await withTemporaryCodexHome { home in
                 let request = try codexRequest(payload)
-                XCTAssertEqual(ApprovalAlwaysScope(for: request), .codexRules(pattern: ["ls", "-la"]))
+                XCTAssertEqual(ApprovalAlwaysScope(for: request), .codexRules(patterns: [["ls", "-la"]]))
                 XCTAssertTrue(CodexPermissionRules().persistAlwaysAllowRule(for: request))
                 let rules = try savedRules(in: home)
                 XCTAssertTrue(rules.contains(#"pattern = ["ls", "-la"]"#), rules)
@@ -526,7 +526,7 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
             let appState = AppState()
             let request = try codexRequest(["tool_name": "Bash", "tool_input": ["command": "git push --force origin main"]])
             let scope = ApprovalAlwaysScope(for: request)
-            XCTAssertEqual(scope, .codexRules(pattern: ["git", "push", "--force"]))
+            XCTAssertEqual(scope, .codexRules(patterns: [["git", "push", "--force"]]))
             XCTAssertEqual(ApprovalCopy.alwaysLink(tool: "Bash", scope: scope),
                            "Always allow commands starting with git push --force — saved to ~/.codex/rules")
             XCTAssertTrue(ApprovalHints.always(scope: scope).contains("commands that start with git push --force"))
@@ -580,6 +580,265 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
             appState.denyPermission(expectedSessionId: "codex-s1")
             let bashAnswer = try await awaitValue(of: bashResponse)
             XCTAssertEqual(try behavior(bashAnswer), "deny")
+        }
+    }
+
+    // MARK: - Codex "Always" holds for the session that is running (#380)
+
+    /// The request is answered on a card, and the card is gone afterwards.
+    private func expectCard(
+        _ appState: AppState,
+        _ request: HookEvent,
+        _ why: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let response = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        XCTAssertEqual(appState.permissionQueue.count, 1, why, file: file, line: line)
+        appState.denyPermission(expectedSessionId: request.sessionId)
+        let answer = try await awaitValue(of: response)
+        XCTAssertEqual(try behavior(answer), "deny", why, file: file, line: line)
+    }
+
+    /// The request is allowed with no card: an "Always" of its session covers it.
+    private func expectAnsweredByAlways(
+        _ appState: AppState,
+        _ request: HookEvent,
+        _ why: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let response = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        XCTAssertTrue(appState.permissionQueue.isEmpty, why, file: file, line: line)
+        let answer = try await awaitValue(of: response)
+        XCTAssertEqual(try behavior(answer), "allow", why, file: file, line: line)
+    }
+
+    private func codexCommand(_ command: String, session: String = "codex-s1", _ extra: [String: Any] = [:]) throws -> HookEvent {
+        try codexRequest(["tool_name": "Bash", "tool_input": ["command": command]].merging(extra) { $1 }, session: session)
+    }
+
+    /// A running Codex reads ~/.codex/rules only when a session starts
+    /// (codex-rs/core/src/session/mod.rs, `ExecPolicyManager::load`), so the
+    /// rule "Always" saved never reached the session it was clicked in, and
+    /// the same command asked again and again (#380). The island answers
+    /// that session's commands the rule covers, as Codex does once it has
+    /// read it — and nothing else: not a command that only starts like it,
+    /// not one with another command or a redirection after it, not another
+    /// session's, not a remote host's session of the same id.
+    func testCodexAlwaysHoldsItsSavedRuleForTheRunningSessionOnly() async throws {
+        try await withTemporaryCodexHome { home in
+            let appState = AppState()
+            let push = try codexCommand("git push --force origin main")
+            let first = await startHookRequest { appState.handlePermissionRequest(push, continuation: $0) }
+            appState.approvePermission(always: true, expectedSessionId: "codex-s1")
+            let firstAnswer = try await awaitValue(of: first)
+            XCTAssertEqual(try behavior(firstAnswer), "allow")
+            XCTAssertTrue(try savedRules(in: home).contains(#"pattern = ["git", "push", "--force"]"#))
+
+            try await expectAnsweredByAlways(appState, try codexCommand("git push --force origin main"), "the same command")
+            try await expectAnsweredByAlways(appState, try codexCommand("git push --force origin release"), "a command the rule covers")
+            try await expectAnsweredByAlways(
+                appState,
+                try codexCommand("git push --force origin main", ["agent_id": "thread-2", "agent_type": "worker"]),
+                "a subagent filed under the session is in it"
+            )
+
+            try await expectCard(appState, try codexCommand("git push origin main"), "words the rule does not start with")
+            try await expectCard(appState, try codexCommand("git push --force origin main && rm -rf build"), "a command the rule does not cover follows")
+            try await expectCard(appState, try codexCommand("git push --force origin main > /tmp/out"), "Codex matches no rule against a redirection")
+            try await expectCard(appState, try codexCommand("git push --force origin main", session: "codex-s2"), "another session")
+            try await expectCard(
+                appState,
+                try codexRequest([
+                    "tool_name": "Bash", "tool_input": ["command": "git push --force origin main"],
+                    "_remote_host_id": "devbox",
+                ]),
+                "a remote host's session of the same id"
+            )
+
+            // A new session under the same id read the rule when it started.
+            appState.handleEvent(try event([
+                "hook_event_name": "SessionStart", "session_id": "codex-s1", "_source": "codex",
+                "cwd": "/Users/me/project", "transcript_path": "/Users/me/.codex/sessions/rollout-codex-s1.jsonl",
+            ]))
+            try await expectCard(appState, try codexCommand("git push --force origin main"), "Codex asks: the user decides")
+        }
+    }
+
+    /// Subagents asking at once queue their requests behind the card the
+    /// user answers. Those the same "Always" covers are answered with it,
+    /// not shown one after another; the rest still wait for the user.
+    func testCodexAlwaysAnswersTheSessionsWaitingRequestsItCovers() async throws {
+        try await withTemporaryCodexHome { _ in
+            let appState = AppState()
+            let main = try codexCommand("make test")
+            let sibling = try codexCommand("make test -j2", ["agent_id": "thread-2", "agent_type": "worker"])
+            let other = try codexCommand("rm -rf build", ["agent_id": "thread-3", "agent_type": "worker"])
+            let otherSession = try codexCommand("make test", session: "codex-s2")
+            let mainTask = await startHookRequest { appState.handlePermissionRequest(main, continuation: $0) }
+            let siblingTask = await startHookRequest { appState.handlePermissionRequest(sibling, continuation: $0) }
+            let otherTask = await startHookRequest { appState.handlePermissionRequest(other, continuation: $0) }
+            let otherSessionTask = await startHookRequest { appState.handlePermissionRequest(otherSession, continuation: $0) }
+            XCTAssertEqual(appState.permissionQueue.count, 4)
+
+            appState.approvePermission(always: true, expectedSessionId: "codex-s1")
+            let mainAnswer = try await awaitValue(of: mainTask)
+            let siblingAnswer = try await awaitValue(of: siblingTask)
+            XCTAssertEqual(try behavior(mainAnswer), "allow")
+            XCTAssertEqual(try behavior(siblingAnswer), "allow", "covered by the same Always")
+            XCTAssertEqual(appState.permissionQueue.map { $0.event.toolInput?["command"] as? String },
+                           ["rm -rf build", "make test"], "an uncovered command and another session still wait")
+
+            appState.denyPermission(expectedSessionId: "codex-s1")
+            appState.denyPermission(expectedSessionId: "codex-s2")
+            let otherAnswer = try await awaitValue(of: otherTask)
+            let otherSessionAnswer = try await awaitValue(of: otherSessionTask)
+            XCTAssertEqual(try behavior(otherAnswer), "deny")
+            XCTAssertEqual(try behavior(otherSessionAnswer), "deny")
+        }
+    }
+
+    /// Codex checks a rule against each command of a script and allows it
+    /// only when every one is allowed, so a rule from the first command
+    /// alone left `cd app && make test` asking even after a restart. "Always"
+    /// saves one per command and its link names each; a script too long to
+    /// name holds for the session instead.
+    func testCodexAlwaysOnACompoundCommandSavesARuleForEachOfItsCommands() async throws {
+        let savedLanguage = L10n.shared.language
+        defer { L10n.shared.language = savedLanguage }
+        L10n.shared.language = "en"
+        try await withTemporaryCodexHome { home in
+            let appState = AppState()
+            let request = try codexCommand("cd app && make test | tee test.log")
+            let scope = ApprovalAlwaysScope(for: request)
+            XCTAssertEqual(scope, .codexRules(patterns: [["cd", "app"], ["make", "test"], ["tee", "test.log"]]))
+            XCTAssertEqual(ApprovalCopy.alwaysLink(tool: "Bash", scope: scope),
+                           "Always allow commands starting with cd app or make test or tee test.log — saved to ~/.codex/rules")
+            XCTAssertEqual(ApprovalCopy.inlineAlwaysTitle(tool: "Bash", scope: scope),
+                           "Always allow cd app … or make test … or tee test.log …")
+
+            let response = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+            appState.approvePermission(always: true, expectedSessionId: "codex-s1")
+            let answer = try await awaitValue(of: response)
+            XCTAssertEqual(try behavior(answer), "allow")
+            let rules = try savedRules(in: home)
+            for pattern in [#"["cd", "app"]"#, #"["make", "test"]"#, #"["tee", "test.log"]"#] {
+                XCTAssertTrue(rules.contains("pattern = \(pattern)"), rules)
+            }
+
+            try await expectAnsweredByAlways(appState, try codexCommand("cd app && make test | tee test.log"), "the same script")
+            try await expectAnsweredByAlways(appState, try codexCommand("make test -j4"), "one of its commands")
+            try await expectCard(appState, try codexCommand("cd app && make lint"), "one command is not covered")
+
+            let long = try codexCommand("git add -A && git commit -m wip && git pull --rebase && make test && git push")
+            XCTAssertEqual(ApprovalAlwaysScope(for: long), .session, "five rules are more than a link names")
+        }
+    }
+
+    /// Codex matches its rules only against a script it reads as plain
+    /// commands; a rule made from the words of any other script never
+    /// matched it, so its card claimed a rule that changed nothing. Such a
+    /// request's "Always" holds for the session, and says so.
+    func testCodexAlwaysSavesNoRuleCodexCouldNotMatch() async throws {
+        let savedLanguage = L10n.shared.language
+        defer { L10n.shared.language = savedLanguage }
+        L10n.shared.language = "en"
+        try await withTemporaryCodexHome { home in
+            for command in [
+                "swift build 2>&1 | tail -20",
+                "php vendor/bin/phpstan analyse $(git diff --name-only)",
+                "cat ~/notes.txt",
+                "rm -rf build/*",
+                "FOO=1 make test",
+                "echo \"$HOME\"",
+                "make test &",
+            ] {
+                let request = try codexCommand(command)
+                XCTAssertEqual(ApprovalAlwaysScope(for: request), .session, command)
+                XCTAssertFalse(CodexPermissionRules().persistAlwaysAllowRule(for: request), command)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: home.path), "nothing written under CODEX_HOME")
+            XCTAssertEqual(ApprovalCopy.alwaysLink(tool: "Bash", scope: .session), "Always allow Bash this session")
+        }
+    }
+
+    /// An MCP tool's "Always" is saved to config.toml only under a server
+    /// config.toml declares — the built-in `codex_apps` and a plugin's
+    /// servers have no table to write — and holds for the running session
+    /// either way, since Codex reads config.toml when a session starts.
+    func testCodexMCPAlwaysHoldsForTheRunningSessionAndSavesOnlyForADeclaredServer() async throws {
+        let savedLanguage = L10n.shared.language
+        defer { L10n.shared.language = savedLanguage }
+        L10n.shared.language = "en"
+        try await withTemporaryCodexHome { home in
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            let config = home.appendingPathComponent("config.toml")
+            try "[mcp_servers.docs]\ncommand = \"docs-mcp\"\n".write(to: config, atomically: true, encoding: .utf8)
+            let appState = AppState()
+
+            let declared = try codexRequest(["tool_name": "mcp__docs__search", "tool_input": ["q": "x"]])
+            XCTAssertEqual(ApprovalAlwaysScope(for: declared), .codexMCPConfig)
+            let first = await startHookRequest { appState.handlePermissionRequest(declared, continuation: $0) }
+            appState.approvePermission(always: true, expectedSessionId: "codex-s1")
+            let firstAnswer = try await awaitValue(of: first)
+            XCTAssertEqual(try behavior(firstAnswer), "allow")
+            XCTAssertTrue(try String(contentsOf: config, encoding: .utf8).contains("[mcp_servers.docs.tools.search]"))
+            try await expectAnsweredByAlways(appState, declared, "config.toml is read when a session starts")
+
+            let builtIn = try codexRequest(["tool_name": "mcp__codex_apps__gmail_send", "tool_input": ["to": "x"]])
+            let scope = ApprovalAlwaysScope(for: builtIn)
+            XCTAssertEqual(scope, .session)
+            XCTAssertEqual(ApprovalCopy.alwaysLink(tool: "mcp__codex_apps__gmail_send", scope: scope),
+                           "Always allow gmail_send this session")
+            let configBefore = try String(contentsOf: config, encoding: .utf8)
+            let second = await startHookRequest { appState.handlePermissionRequest(builtIn, continuation: $0) }
+            appState.approvePermission(always: true, expectedSessionId: "codex-s1")
+            let secondAnswer = try await awaitValue(of: second)
+            XCTAssertEqual(try behavior(secondAnswer), "allow")
+            XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), configBefore, "no table for an undeclared server")
+            try await expectAnsweredByAlways(appState, builtIn, "the session's Always")
+            try await expectCard(appState, try codexRequest(["tool_name": "mcp__docs__fetch", "tool_input": ["id": "1"]]),
+                                 "another tool of the server")
+        }
+    }
+
+    /// The commands of a script as Codex reads them for its rules
+    /// (codex-rs/shell-command/src/bash.rs and its tests): plain words joined
+    /// by `&&`, `||`, `;`, `|`, newlines; nothing else.
+    func testCodexScriptsAreReadAsCodexReadsThem() {
+        let accepted: [(String, [[String]])] = [
+            ("ls -1", [["ls", "-1"]]),
+            ("ls && pwd; echo 'hi there' | wc -l", [["ls"], ["pwd"], ["echo", "hi there"], ["wc", "-l"]]),
+            ("echo \"hello world\"", [["echo", "hello world"]]),
+            ("git commit -m \"line1\nline2\"", [["git", "commit", "-m", "line1\nline2"]]),
+            (#"echo "/usr"'/'"local"/bin"#, [["echo", "/usr/local/bin"]]),
+            ("echo 123 456", [["echo", "123", "456"]]),
+            (#"rg -g"*.py" pattern"#, [["rg", "-g*.py", "pattern"]]),
+            (#"echo "\n""#, [["echo", #"\n"#]]),
+            (#"echo "~HOME" 'HEAD~1' "=sh" 'foo#bar'"#, [["echo", "~HOME", "HEAD~1", "=sh", "foo#bar"]]),
+            ("grep -n 'pattern' -g'*.txt'", [["grep", "-n", "pattern", "-g*.txt"]]),
+            ("make test\n\nmake lint\n", [["make", "test"], ["make", "lint"]]),
+            ("make build &&\n  make test", [["make", "build"], ["make", "test"]]),
+            ("node -e 'a\nb'", [["node", "-e", "a\nb"]]),
+            ("echo ''", [["echo", ""]]),
+            ("ls;", [["ls"]]),
+        ]
+        for (script, commands) in accepted {
+            XCTAssertEqual(CodexPermissionRules.plainCommands(in: script), commands, script)
+        }
+
+        let refused = [
+            "", "   ", "echo \"hi ${USER}\"", "echo \"$HOME\"", "(ls)", "ls || (pwd && echo hi)", "ls > out.txt",
+            "echo hi & echo bye", "echo $(pwd)", "echo `pwd`", "echo $HOME", "find . -{delete,print}", "find . -del*",
+            "find . -delet?", "find . -delet[e]", #"find . -de\lete"#, "echo ~", "echo HEAD~1", "echo HEAD^", "echo =sh",
+            "echo foo#bar", "l* -l", #"echo "\$HOME""#, #"echo "\\""#, "find . \"-de\\\nlete\"", "FOO=bar ls", "ls &&",
+            "&& ls", "ls ;; pwd", "ls | | wc", "rg -g\"$VAR\" pattern", "ls 2>&1", "ls |& cat", "cat <<EOF", "'ls' -la",
+            "\"git\" status", "if true; then ls; fi", "for f in a; do echo; done", "! ls", "ls # list", "ls\r\n",
+            "echo 'unterminated", "echo \"unterminated", "echo ''\"\"",
+        ]
+        for script in refused {
+            XCTAssertNil(CodexPermissionRules.plainCommands(in: script), script)
         }
     }
 

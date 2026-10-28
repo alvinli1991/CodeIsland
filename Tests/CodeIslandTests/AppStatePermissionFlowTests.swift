@@ -260,7 +260,7 @@ final class AppStatePermissionFlowTests: XCTestCase {
             sessionId: "s-codex-always-allow",
             toolName: "Bash",
             toolInput: [
-                "command": "php vendor/bin/phpstan analyse $(git diff --name-only origin/master...HEAD | rg '\\.php$' | tr '\\n' ' ' )"
+                "command": "php vendor/bin/phpstan analyse src tests --memory-limit=1G"
             ],
             source: "codex"
         )
@@ -734,7 +734,11 @@ final class AppStatePermissionFlowTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: codexHome.path), "nothing written under CODEX_HOME")
     }
 
-    func testLocalCodexAlwaysAllowStillSavesARuleAndAsksAgainThroughCodex() async throws {
+    /// #380: Codex loads ~/.codex/rules when a session starts and never
+    /// again, so the rule "Always" saved reached only the sessions started
+    /// after it; the one the user clicked in asked again for the same
+    /// command. The island answers that session's covered commands itself.
+    func testLocalCodexAlwaysAllowSavesARuleAndHoldsItForTheRunningSession() async throws {
         let codexHome = makeTemporaryCodexHome()
         defer { try? FileManager.default.removeItem(at: codexHome) }
         let appState = AppState()
@@ -751,12 +755,22 @@ final class AppStatePermissionFlowTests: XCTestCase {
         try await assertBehavior(of: task, "allow")
         XCTAssertTrue(try readCodeIslandRules(in: codexHome).contains(#"pattern = ["make", "test"]"#))
 
-        // Codex itself applies the saved rule; a request that still reaches
-        // the island is one Codex wants asked.
         let again = await startHookRequest { appState.handlePermissionRequest(event, continuation: $0) }
+        XCTAssertTrue(appState.permissionQueue.isEmpty, "the running session never reads the rule; the island holds it")
+        try await assertBehavior(of: again, "allow")
+
+        // Codex asks in another session only when it started before the
+        // rule was saved: the user answers that card.
+        let other = try makePermissionRequestEvent(
+            sessionId: "s-local-codex-2",
+            toolName: "Bash",
+            toolInput: ["command": "make test"],
+            source: "codex"
+        )
+        let otherTask = await startHookRequest { appState.handlePermissionRequest(other, continuation: $0) }
         XCTAssertEqual(appState.permissionQueue.count, 1)
-        appState.denyPermission(expectedSessionId: "s-local-codex")
-        try await assertBehavior(of: again, "deny")
+        appState.denyPermission(expectedSessionId: "s-local-codex-2")
+        try await assertBehavior(of: otherTask, "deny")
     }
 
     func testCodexAutoReviewConfigDefersPermissionRequestToCodex() throws {

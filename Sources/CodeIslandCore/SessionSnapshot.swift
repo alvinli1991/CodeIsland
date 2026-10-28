@@ -208,10 +208,16 @@ public struct SessionSnapshot: Sendable {
     public var remoteHostId: String?
     public var remoteHostName: String?
     /// Tools the user chose "Always allow … this session" for on a card whose
-    /// agent keeps no rule for it: a remote Codex, whose rules live on its
-    /// own host. Its later requests for them are allowed without a card. Goes
-    /// with the card — a SessionStart rebuilds it — and is never persisted.
+    /// agent keeps no rule for it — a remote Codex, whose rules live on its
+    /// own host; a running Codex, which reads the rules and config.toml it
+    /// is given only when a session starts. Its later requests for them are
+    /// allowed without a card. Goes with the card — a SessionStart rebuilds
+    /// it — and is never persisted.
     public var alwaysAllowedTools: Set<String> = []
+    /// The same for the Codex prefix rules an "Always" of this session saved
+    /// (the words its link named): a later command each of whose commands
+    /// starts with one of them is allowed without a card.
+    public var alwaysAllowedCommandPrefixes: Set<[String]> = []
     /// nil = unchecked, false = not YOLO, true = YOLO
     public var isYoloMode: Bool?
     /// Checked-out git branch for cwd; refreshed on cwd changes and Stop

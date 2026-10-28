@@ -2083,16 +2083,11 @@ final class AppState {
             return
         }
 
-        // "Always allow … this session" on a Codex card that saved no rule
-        // (approvePermission) — a remote Codex's, or a request no rule can
-        // describe: nothing in Codex remembers it, so it is answered here,
-        // for every request of the tool, as the card said.
-        if let toolName = event.toolName,
-           CodexPermissionRules.isCodexEvent(event),
-           sessions[sessionId]?.alwaysAllowedTools.contains(toolName) == true {
-            continuation.resume(returning: Data(
-                #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8
-            ))
+        // "Always allow" on an earlier card of this session, for an agent
+        // that keeps nothing which stops it asking again (approvePermission):
+        // the island answers the request, as that card said it would.
+        if sessionAlwaysAllows(event, sessionId: sessionId) {
+            continuation.resume(returning: Self.plainAllowAnswer)
             return
         }
 
@@ -2225,18 +2220,18 @@ final class AppState {
         dismissedPermissionSessionIds.remove(sessionId)
         let responseData: Data
         if always, CodexPermissionRules.isCodexEvent(pending.event) {
-            if CodexPermissionRules.alwaysSavesRule(for: pending.event) {
-                _ = CodexPermissionRules().persistAlwaysAllowRule(for: pending.event)
-            } else if let toolName = pending.event.toolName, !toolName.isEmpty {
-                // A remote Codex reads its rules on its own host, and none
-                // may be written to this Mac's; and a local request no rule
-                // can describe has none to save. "Always" holds for this
-                // session instead — what the card said — and the island
-                // answers the session's next requests for the tool.
-                sessions[sessionId]?.alwaysAllowedTools.insert(toolName)
-            }
-            let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
-            responseData = Data(response.utf8)
+            // A running Codex never takes in what "Always" saves: it reads
+            // ~/.codex/rules and config.toml when a session starts
+            // (codex-rs/core/src/session/mod.rs, `ExecPolicyManager::load`;
+            // only its own approvals reach the session's policy), and its
+            // PermissionRequest output holds nothing beyond this call. The
+            // rule stops the sessions Codex starts from now on; this one's
+            // next requests come here, and the island answers them as the
+            // card said. A remote Codex reads its rules on its own host and
+            // none may be written to this Mac's, and a request no rule can
+            // describe has none to save: "Always" holds for the session.
+            rememberCodexAlways(pending, sessionId: sessionId)
+            responseData = Self.plainAllowAnswer
         } else if always, Self.isZcodeEvent(pending.event) {
             responseData = Self.zcodeAlwaysAllowResponse(toolName: pending.event.toolName)
         } else if always {
@@ -2267,8 +2262,7 @@ final class AppState {
             ]
             responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         } else {
-            let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
-            responseData = Data(response.utf8)
+            responseData = Self.plainAllowAnswer
         }
         pending.continuation.resume(returning: responseData)
         resolveMergedSubagentAfterUI(
@@ -2278,9 +2272,66 @@ final class AppState {
             keepSubagentTool: pending.event.toolName,
             idleParentWhenNoAgent: false
         )
+        if always {
+            answerQueuedRequestsCoveredByAlways(sessionId: sessionId)
+        }
 
         showNextPending()
         refreshDerivedState()
+    }
+
+    /// The session's requests that were already waiting when the user chose
+    /// "Always" on one of them — a parallel call's, a subagent's — and that
+    /// the island now holds that "Always" for (sessionAlwaysAllows): answered
+    /// as the session's later ones will be, rather than each asking again.
+    private func answerQueuedRequestsCoveredByAlways(sessionId: String) {
+        let covered = permissionQueue.filter {
+            ($0.event.sessionId ?? "default") == sessionId && sessionAlwaysAllows($0.event, sessionId: sessionId)
+        }
+        guard !covered.isEmpty else { return }
+        let ids = Set(covered.map(\.id))
+        permissionQueue.removeAll { ids.contains($0.id) }
+        for request in covered {
+            request.continuation.resume(returning: Self.plainAllowAnswer)
+            resolveMergedSubagentAfterUI(
+                sessionId: sessionId,
+                agentId: request.event.agentId,
+                subagentStatus: .running,
+                keepSubagentTool: request.event.toolName,
+                idleParentWhenNoAgent: false
+            )
+        }
+    }
+
+    /// Codex's "Always", as its card's link put it (``PermissionRequest/alwaysScope``):
+    /// the rule saved for the sessions Codex starts from now on, and held by
+    /// the island for this one.
+    private func rememberCodexAlways(_ pending: PermissionRequest, sessionId: String) {
+        let event = pending.event
+        let toolName = event.toolName ?? ""
+        switch pending.alwaysScope {
+        case .codexRules(let patterns):
+            _ = CodexPermissionRules().persistPrefixRules(patterns, for: event)
+            sessions[sessionId]?.alwaysAllowedCommandPrefixes.formUnion(patterns)
+        case .codexMCPConfig:
+            _ = CodexPermissionRules().persistAlwaysAllowRule(for: event)
+            if !toolName.isEmpty { sessions[sessionId]?.alwaysAllowedTools.insert(toolName) }
+        case .session:
+            if !toolName.isEmpty { sessions[sessionId]?.alwaysAllowedTools.insert(toolName) }
+        }
+    }
+
+    /// Whether an "Always" the user chose on an earlier card of this session
+    /// answers `event` (approvePermission): the tool it named, or — for Codex
+    /// — a command each of whose commands starts with words a rule it saved
+    /// names. Only the session's own: a subagent filed under it is in it, and
+    /// a remote host's sessions are filed under ids of their own.
+    private func sessionAlwaysAllows(_ event: HookEvent, sessionId: String) -> Bool {
+        guard let session = sessions[sessionId],
+              let toolName = event.toolName, !toolName.isEmpty else { return false }
+        if session.alwaysAllowedTools.contains(toolName) { return true }
+        return CodexPermissionRules.isCodexEvent(event)
+            && CodexPermissionRules.commandsStart(event, withAnyOf: session.alwaysAllowedCommandPrefixes)
     }
 
     nonisolated static func isZcodeEvent(_ event: HookEvent) -> Bool {

@@ -74,6 +74,14 @@ extension AppState {
     ///   request, and Antigravity's `PreToolUse` is answered `ask` at the edge.
     nonisolated static let noDecisionAnswer = Data("{}".utf8)
 
+    /// "Allow" this one call, and nothing more. Codex's PermissionRequest
+    /// output fails closed on anything else (codex-rs/hooks/schema/generated/
+    /// permission-request.command.output.schema.json: `updatedPermissions`
+    /// is reserved), and the bridge reduces it to Gemini's `{"decision":"allow"}`.
+    nonisolated static let plainAllowAnswer = Data(
+        #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8
+    )
+
     /// Cache a PreToolUse so later PermissionRequest / PostToolUse events of the
     /// same card carrying the same tool_use_id can be correlated back to the
     /// originating invocation.
@@ -261,7 +269,8 @@ extension AppState {
             id: existing.id,
             event: request.event,
             continuation: request.continuation,
-            hookConnectionId: request.hookConnectionId
+            hookConnectionId: request.hookConnectionId,
+            alwaysScope: existing.alwaysScope
         )
         return true
     }
