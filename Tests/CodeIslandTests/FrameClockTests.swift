@@ -107,6 +107,29 @@ final class FrameClockTests: XCTestCase {
         }
     }
 
+    func testAWaitingBadgeOnTheCollapsedBarMovesOnTheClock() {
+        // An approval waiting behind the collapsed bar: its badge pulses with
+        // the mascots, and holds still with them.
+        for animating in [true, false] {
+            MascotAnimationGate.shared.setPanelVisible(animating)
+            let state = AppState()
+            DebugHarness.apply(.approval, to: state)
+            state.surface = .collapsed
+            state.refreshDerivedState()
+            XCTAssertEqual(state.status, .waitingApproval, "the bar shows no waiting badge")
+            let host = install(panel(state, hasNotch: true), size: CGSize(width: 620, height: 510))
+            let rate = layoutRate(of: host)
+            if animating {
+                XCTAssertLessThanOrEqual(rate, Self.clockRateCeiling, "the badge pulses on every display frame")
+                XCTAssertGreaterThanOrEqual(rate, 5, "nothing on the bar moves")
+            } else {
+                XCTAssertEqual(rate, 0, "the badge keeps pulsing while the island holds still")
+            }
+            uninstall(host)
+        }
+        MascotAnimationGate.shared.setPanelVisible(true)
+    }
+
     func testEveryClockDueAtATickSeesTheSameTick() {
         // One wakeup and one update per tick, not one per clock: each clock
         // updating on its own woke the island up several times a frame.

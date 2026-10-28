@@ -793,9 +793,6 @@ private struct CompactRightWing: View {
     @AppStorage(SettingsKey.quietHoursEnabled) private var quietHoursEnabled = SettingsDefaults.quietHoursEnabled
     @AppStorage(SettingsKey.quietHoursStart) private var quietHoursStart = SettingsDefaults.quietHoursStart
     @AppStorage(SettingsKey.quietHoursEnd) private var quietHoursEnd = SettingsDefaults.quietHoursEnd
-    /// The waiting badges pulse forever; with Reduce Motion they hold still
-    /// (a one-off follow-up bounce still marks a reminder).
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Re-evaluated on every re-render; the compact bar redraws often enough
     /// that the moon appears/disappears close to the window edges.
@@ -846,7 +843,7 @@ private struct CompactRightWing: View {
                     Image(systemName: "questionmark.bubble.fill")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
-                        .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+                        .modifier(WaitingBadgePulse())
                         .symbolEffect(.bounce, value: appState.followUps.hintPulse)
                         .help(l10n["question_waiting_hint"])
                 } else if appState.followUps.hintActive {
@@ -863,7 +860,7 @@ private struct CompactRightWing: View {
                     Image(systemName: "bell.fill")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
-                        .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+                        .modifier(WaitingBadgePulse())
                 }
 
                 if showToolStatus {
@@ -906,6 +903,27 @@ private struct CompactRightWing: View {
         .background(GeometryReader { geo in
             Color.clear.preference(key: CompactRightWingWidthKey.self, value: expanded ? 0 : geo.size.width)
         })
+    }
+}
+
+/// The pulse on a waiting badge, for as long as an approval or a question
+/// waits behind the collapsed bar. It runs on the island's clock (FrameClock):
+/// `symbolEffect(.pulse, options: .repeating)` updated on every display frame
+/// and laid the island out each time. With Reduce Motion, or while the
+/// island's animations are held, the badge holds still (a one-off follow-up
+/// bounce still marks a reminder).
+private struct WaitingBadgePulse: ViewModifier {
+    @ObservedObject private var animationGate = MascotAnimationGate.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        if animationGate.animationsActive && !reduceMotion {
+            FrameClock(interval: FrameTicker.step) { now in
+                content.opacity(0.45 + 0.55 * MascotMotion.glowPulse(now))
+            }
+        } else {
+            content
+        }
     }
 }
 
