@@ -14,6 +14,8 @@ struct ScreenDetector {
         return min(max(screenW * 0.14, 160), 240)
     }
 
+    /// `activeWindowBounds` is in AppKit's global coordinates, as the
+    /// candidates' frames are (`appKitRect(fromWindowBounds:primaryScreenMaxY:)`).
     static func autoPreferredIndex(candidates: [Candidate], activeWindowBounds: CGRect?) -> Int? {
         guard !candidates.isEmpty else { return nil }
 
@@ -45,6 +47,31 @@ struct ScreenDetector {
         return candidates.indices.first
     }
 
+    /// A window's CGWindowList bounds in AppKit's global coordinates.
+    ///
+    /// CGWindowList measures from the top-left of the primary screen with y
+    /// growing down, `NSScreen.frame` from its bottom-left with y growing up.
+    /// Compared as they were, a window on a display above or below the
+    /// primary one — or beside it, below the primary's height — fell on no
+    /// screen or on the wrong one, and Auto left the island on another
+    /// display than the one being worked on (#384).
+    static func appKitRect(fromWindowBounds bounds: CGRect, primaryScreenMaxY: CGFloat) -> CGRect {
+        CGRect(x: bounds.minX, y: primaryScreenMaxY - bounds.maxY, width: bounds.width, height: bounds.height)
+    }
+
+    /// Auto's pick for the front window as CGWindowList reports it. The
+    /// candidates come in `NSScreen.screens` order: the primary screen, the
+    /// one the window list is measured from, first.
+    static func autoPreferredIndex(candidates: [Candidate], frontWindowListBounds: CGRect?) -> Int? {
+        let primaryMaxY = candidates.first?.frame.maxY ?? 0
+        return autoPreferredIndex(
+            candidates: candidates,
+            activeWindowBounds: frontWindowListBounds.map {
+                appKitRect(fromWindowBounds: $0, primaryScreenMaxY: primaryMaxY)
+            }
+        )
+    }
+
     /// Preferred screen: active work screen first, then built-in (notch), then main
     static var preferredScreen: NSScreen {
         let screens = NSScreen.screens
@@ -63,7 +90,7 @@ struct ScreenDetector {
 
         if let index = autoPreferredIndex(
             candidates: candidates,
-            activeWindowBounds: frontmostApplicationWindowBounds()
+            frontWindowListBounds: frontmostApplicationWindowBounds()
         ), index < screens.count {
             return screens[index]
         }
@@ -155,6 +182,7 @@ struct ScreenDetector {
         return intersection.width * intersection.height
     }
 
+    /// The front window of the app in front, in CGWindowList coordinates.
     private static func frontmostApplicationWindowBounds() -> CGRect? {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
         let ownPID = ProcessInfo.processInfo.processIdentifier
