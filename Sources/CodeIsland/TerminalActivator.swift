@@ -156,6 +156,13 @@ struct TerminalActivator {
         // no cwd or no matching window, so this never regresses single-window apps.
         if let bundleId = session.termBundleId,
            nativeAppBundles[bundleId] != nil {
+            // Codex Desktop keeps every thread in one window: open the card's
+            // own thread. Raising the app left the user on whichever thread it
+            // last showed.
+            if let link = codexDesktopThreadLink(for: session) {
+                openInCodexDesktop(link, fallbackCwd: session.cwd)
+                return
+            }
             activateIDEWindow(bundleId: bundleId, cwd: session.cwd)
             return
         }
@@ -1362,6 +1369,42 @@ struct TerminalActivator {
     }
 
     // MARK: - Activate by bundle ID
+
+    /// `codex://threads/<id>`, the link Codex Desktop itself uses for a local
+    /// thread. Desktop cards are keyed `codexapp:<id>` here, but the thread's
+    /// own id stays in `providerSessionId`. Nil for anything but a Desktop
+    /// session with a well-formed thread id, so a click never opens a guessed
+    /// URL — a Codex CLI run in Codex's own terminal included.
+    static func codexDesktopThreadLink(for session: SessionSnapshot) -> URL? {
+        guard session.termBundleId == AppState.codexAppBundleId,
+              session.isNativeAppMode,
+              let threadId = session.providerSessionId,
+              UUID(uuidString: threadId) != nil
+        else { return nil }
+        return URL(string: "codex://threads/\(threadId)")
+    }
+
+    /// Hands the link to the Codex that is running. More than one installed
+    /// app can claim Codex's bundle id and the `codex:` scheme, and the
+    /// system's default handler need not be the one holding the thread. Codex
+    /// brings its window back (minimized included) and shows the thread; if
+    /// macOS can't deliver the link, the jump raises the app as before.
+    private static func openInCodexDesktop(_ link: URL, fallbackCwd: String?) {
+        let bundleId = AppState.codexAppBundleId
+        let workspace = NSWorkspace.shared
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first
+        guard let appURL = running?.bundleURL ?? workspace.urlForApplication(withBundleIdentifier: bundleId) else {
+            activateIDEWindow(bundleId: bundleId, cwd: fallbackCwd)
+            return
+        }
+        if let running, running.isHidden { running.unhide() }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        workspace.open([link], withApplicationAt: appURL, configuration: configuration) { _, error in
+            guard error != nil else { return }
+            DispatchQueue.main.async { activateIDEWindow(bundleId: bundleId, cwd: fallbackCwd) }
+        }
+    }
 
     private static func activateByBundleId(_ bundleId: String) {
         if let app = NSWorkspace.shared.runningApplications.first(where: {
