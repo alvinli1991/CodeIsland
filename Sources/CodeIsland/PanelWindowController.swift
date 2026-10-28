@@ -428,7 +428,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         self.hostingView = contentView
         panel.contentView = contentView
         lastChosenScreenSignature = ScreenDetector.signature(for: screen)
-        updatePosition()
+        panel.setFrame(panelFrame(for: screen), display: true)
     }
 
     private func refreshCurrentScreen(forceRebuild: Bool = false) {
@@ -564,6 +564,12 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     private func updatePosition() {
         guard let panel = panel else { return }
         let screen = chosenScreen()
+        // Another display than the one the view was built for is a display
+        // change, which rebuilds the view for that display's notch.
+        guard ScreenDetector.signature(for: screen) == lastChosenScreenSignature else {
+            refreshCurrentScreen()
+            return
+        }
         panel.setFrame(panelFrame(for: screen), display: true)
     }
 
