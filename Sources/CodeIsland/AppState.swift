@@ -921,6 +921,13 @@ final class AppState {
                 _ = showNextPending()
             }
         }
+        // An AiWork card that comes back is hydrated (title, folder, client)
+        // again, whichever way it went — not only through the AiWork sweeps.
+        if sessionId.hasPrefix(Self.aiworkSessionPrefix) {
+            forgetAiWorkHydrateState(
+                sessions[sessionId]?.providerSessionId ?? String(sessionId.dropFirst(Self.aiworkSessionPrefix.count))
+            )
+        }
         sessions.removeValue(forKey: sessionId)
         noteDisplayOnlyWait(sessionId: sessionId, was: displayOnlyWaitBefore)
         stopMonitor(sessionId)
@@ -989,23 +996,44 @@ final class AppState {
         scheduleSave()
     }
 
+    /// Whether an input may bring back a card the user removed. Any input may
+    /// for a card that was not removed. A removed card comes back — its whole
+    /// group with it — for work; passive input (a store snapshot, a hook
+    /// trailing the finished turn, a delayed read) leaves it away, and so does
+    /// work observed (`observedAt`) no later than the removal: a scan that
+    /// started before the click.
+    ///
+    /// A card back on the island by any other way (a fold creating its parent,
+    /// a request) makes the tombstone moot: its later hooks must reach it.
     @discardableResult
     func shouldAdmitRemovedSession(
         _ sessionId: String,
-        evidence: RemovedSessionRevivalEvidence
+        evidence: RemovedSessionRevivalEvidence,
+        observedAt: Date? = nil
     ) -> Bool {
-        guard manuallyRemovedSessions[sessionId] != nil else { return true }
-        switch evidence {
-        case .activeWork, .blockingRequest:
-            let group = manuallyRemovedSessionPeers[sessionId] ?? [sessionId]
-            for member in group {
-                manuallyRemovedSessions.removeValue(forKey: member)
-                manuallyRemovedSessionPeers.removeValue(forKey: member)
+        guard let removedAt = manuallyRemovedSessions[sessionId] else { return true }
+        if sessions[sessionId] == nil {
+            switch evidence {
+            case .passive:
+                return false
+            case .activeWork:
+                if let observedAt, observedAt <= removedAt { return false }
+            case .blockingRequest:
+                break
             }
-            return true
-        case .passive:
-            return false
         }
+        let group = manuallyRemovedSessionPeers[sessionId] ?? [sessionId]
+        for member in group {
+            manuallyRemovedSessions.removeValue(forKey: member)
+            manuallyRemovedSessionPeers.removeValue(forKey: member)
+        }
+        return true
+    }
+
+    /// A request an agent blocks on — a permission, a question — always
+    /// surfaces, on a removed card too: it brings the card's group back.
+    func reviveRemovedSession(_ sessionId: String) {
+        shouldAdmitRemovedSession(sessionId, evidence: .blockingRequest)
     }
 
     // MARK: - Compact bar mascot rotation
@@ -1591,10 +1619,9 @@ final class AppState {
 
         let sessionId = event.sessionId ?? "default"
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
-        let freshWork: Set<String> = ["SessionStart", "UserPromptSubmit", "PreToolUse", "SubagentStart"]
         guard shouldAdmitRemovedSession(
             sessionId,
-            evidence: freshWork.contains(normalizedEventName) ? .activeWork : .passive
+            evidence: .forHookEvent(event, normalizedEventName: normalizedEventName)
         ) else { return }
 
         // Account chatter, not session activity. CodeBuddy fires
@@ -1976,7 +2003,7 @@ final class AppState {
         hookConnectionId: UUID? = nil
     ) {
         let sessionId = event.sessionId ?? "default"
-        guard shouldAdmitRemovedSession(sessionId, evidence: .blockingRequest) else { return }
+        reviveRemovedSession(sessionId)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -2395,7 +2422,7 @@ final class AppState {
         hookConnectionId: UUID? = nil
     ) {
         let sessionId = event.sessionId ?? "default"
-        guard shouldAdmitRemovedSession(sessionId, evidence: .blockingRequest) else { return }
+        reviveRemovedSession(sessionId)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -2453,6 +2480,7 @@ final class AppState {
         hookConnectionId: UUID? = nil
     ) {
         let sessionId = event.sessionId ?? "default"
+        reviveRemovedSession(sessionId)
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -3389,7 +3417,8 @@ final class AppState {
         for info in discovered {
             guard shouldAdmitRemovedSession(
                 info.sessionId,
-                evidence: info.status.map { $0 == .idle ? .passive : .activeWork } ?? .passive
+                evidence: info.status.map { $0 == .idle ? .passive : .activeWork } ?? .passive,
+                observedAt: info.modifiedAt
             ) else { continue }
             if shouldSuppressClosedCodexDesktopDiscovery(info) {
                 continue

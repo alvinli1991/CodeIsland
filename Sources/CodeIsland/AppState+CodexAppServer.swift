@@ -317,7 +317,7 @@ extension AppState {
         }
 
         guard !askItems.isEmpty else { return }
-        guard shouldAdmitRemovedSession(sessionId, evidence: .blockingRequest) else { return }
+        reviveRemovedSession(sessionId)
 
         // Make sure the session exists so the popup has context to render.
         if sessions[sessionId] == nil {
