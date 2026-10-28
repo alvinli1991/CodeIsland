@@ -151,9 +151,7 @@ struct ClawdView: View {
         let opacity = p < 0.8 ? baseOpacity : (1.0 - p) * 3.5 * baseOpacity
         let xOff = size * CGFloat(0.08 + ci * 0.06 + sin(p * .pi * 2) * 0.03)
         let yOff = -size * CGFloat(0.15 + p * 0.38)
-        return Text("z")
-            .font(.system(size: fontSize, weight: .black, design: .monospaced))
-            .foregroundStyle(.white.opacity(opacity))
+        return MascotSleepZ(fontSize: fontSize, fullSize: max(6, size * CGFloat(0.18 + 0.10)), color: .white, opacity: opacity)
             .offset(x: xOff, y: yOff)
     }
 

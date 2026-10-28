@@ -132,9 +132,7 @@ struct TraeView: View {
                 let xOffsetRatio = 0.15 + ci * 0.08 + wave
                 let xOff = size * CGFloat(xOffsetRatio)
                 let yOff = -size * CGFloat(0.15 + phase * 0.38)
-                Text("z")
-                    .font(.system(size: fontSize, weight: .black, design: .monospaced))
-                    .foregroundStyle(Self.bodyC.opacity(opacity))
+                MascotSleepZ(fontSize: fontSize, fullSize: max(6, size * CGFloat(0.18 + 0.10)), color: Self.bodyC, opacity: opacity)
                     .offset(x: xOff, y: yOff)
             }
         }

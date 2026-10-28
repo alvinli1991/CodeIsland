@@ -56,6 +56,28 @@ struct MascotTimeline<Content: View>: View {
     }
 }
 
+// MARK: - Sleep z
+
+/// One of the z's floating up from a sleeping mascot, `fontSize` points tall.
+/// It is laid out at `fullSize`, the largest it gets, and scaled down to
+/// `fontSize` when drawn, so a frame only changes how it is drawn: a font size
+/// or text colour changing every frame made SwiftUI resolve the text again and
+/// lay the island out around it on every frame (#381).
+struct MascotSleepZ: View {
+    let fontSize: CGFloat
+    let fullSize: CGFloat
+    let color: Color
+    let opacity: Double
+
+    var body: some View {
+        Text("z")
+            .font(.system(size: fullSize, weight: .black, design: .monospaced))
+            .foregroundStyle(color)
+            .opacity(opacity)
+            .scaleEffect(fontSize / fullSize)
+    }
+}
+
 // MARK: - Alert glow
 
 /// The soft glow behind a mascot that is waiting on you, pulsing once a

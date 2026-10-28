@@ -113,8 +113,8 @@ struct StepFunView: View {
                         let opacity = phase < 0.8 ? baseOp : (1.0 - phase) * 3.5 * baseOp
                         let xOff = size * CGFloat(0.15 + ci * 0.08)
                         let yOff = -size * CGFloat(0.15 + phase * 0.38)
-                        Text("z").font(.system(size: fontSize, weight: .black, design: .monospaced))
-                            .foregroundStyle(.white.opacity(opacity)).offset(x: xOff, y: yOff)
+                        MascotSleepZ(fontSize: fontSize, fullSize: max(6, size * CGFloat(0.18 + 0.10)), color: .white, opacity: opacity)
+                            .offset(x: xOff, y: yOff)
                     }
                 }
             }

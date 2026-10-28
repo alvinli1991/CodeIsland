@@ -121,8 +121,7 @@ struct HermesView: View {
                         let phase = max(0, ((t - delay).truncatingRemainder(dividingBy: cycle)) / cycle)
                         let fontSize = max(6, size * CGFloat(0.18 + phase * 0.10))
                         let opacity = phase < 0.8 ? (0.7 - ci * 0.1) : (1.0 - phase) * 3.5 * (0.7 - ci * 0.1)
-                        Text("z").font(.system(size: fontSize, weight: .black, design: .monospaced))
-                            .foregroundStyle(Self.eyeC.opacity(opacity))
+                        MascotSleepZ(fontSize: fontSize, fullSize: max(6, size * CGFloat(0.18 + 0.10)), color: Self.eyeC, opacity: opacity)
                             .offset(x: size * CGFloat(0.15 + ci * 0.08), y: -size * CGFloat(0.15 + phase * 0.38))
                     }
                 }

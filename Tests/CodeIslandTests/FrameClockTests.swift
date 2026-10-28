@@ -153,6 +153,16 @@ final class FrameClockTests: XCTestCase {
         XCTAssertEqual(FrameClock(interval: 0.12) { _ in EmptyView() }.interval, 0.10, accuracy: 1e-9)
     }
 
+    func testASleepZTakesTheSameRoomAtEverySize() {
+        // A z that grew in layout moved the island's layout with it, every
+        // frame of every sleeping mascot; only its drawing may change.
+        func fitting(_ fontSize: CGFloat) -> CGSize {
+            NSHostingView(rootView: MascotSleepZ(fontSize: fontSize, fullSize: 9, color: .white, opacity: 0.5)).fittingSize
+        }
+        XCTAssertEqual(fitting(6), fitting(9))
+        XCTAssertEqual(fitting(7.5), fitting(9))
+    }
+
     func testTheAlertGlowPulsesOnceASecondFromFullStrength() {
         XCTAssertEqual(MascotMotion.glowPulse(0), 1, accuracy: 1e-9)
         XCTAssertEqual(MascotMotion.glowPulse(0.25), 0.5, accuracy: 1e-9)
