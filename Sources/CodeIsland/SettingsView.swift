@@ -2724,9 +2724,11 @@ private struct NotchMiniAnim: View {
     private let orange = Color(red: 0.96, green: 0.65, blue: 0.14)
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.03)) { ctx in
+        // FrameClock, not TimelineView: one this fast updates on every
+        // display frame and lays the whole Settings page out each time (#381).
+        FrameClock(interval: FrameTicker.step) { now in
             Canvas { c, sz in
-                draw(c, sz: sz, t: ctx.date.timeIntervalSinceReferenceDate)
+                draw(c, sz: sz, t: now)
             }
         }
         .frame(width: 72, height: 48)
